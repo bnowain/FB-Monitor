@@ -1,0 +1,33 @@
+{
+  "pages": [
+    {
+      "name": "Example Public Page",
+      "url": "https://www.facebook.com/ExamplePublicPage",
+      "enabled": true
+    },
+    {
+      "name": "Example Restricted Group",
+      "url": "https://www.facebook.com/groups/ExampleGroup",
+      "account": "work",
+      "enabled": true
+    },
+    {
+      "name": "Another Page Different Account",
+      "url": "https://www.facebook.com/AnotherPage",
+      "account": "personal",
+      "enabled": true
+    }
+  ],
+  "default_account": "primary",
+  "check_interval_minutes": 15,
+  "comment_tracking_hours": 24,
+  "comment_recheck_interval_minutes": 30,
+  "max_requests_per_hour": 30,
+  "output_dir": "downloads",
+  "headless": true,
+  "notifications": {
+    "enabled": false,
+    "discord_webhook_url": "",
+    "ntfy_topic": ""
+  }
+}
