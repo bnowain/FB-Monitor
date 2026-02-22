@@ -192,6 +192,15 @@ class RateLimiter:
 # Browser context factory
 # ---------------------------------------------------------------------------
 
+def get_tor_proxy(config: dict) -> dict | None:
+    """Return Playwright proxy dict if Tor is enabled, else None."""
+    tor_cfg = config.get("tor", {})
+    if not tor_cfg.get("enabled", False):
+        return None
+    port = tor_cfg.get("socks_port", 9050)
+    return {"server": f"socks5://127.0.0.1:{port}"}
+
+
 def create_stealth_context(browser, config: dict):
     """
     Create a browser context with randomized fingerprint.
@@ -203,7 +212,7 @@ def create_stealth_context(browser, config: dict):
     # Randomize locale slightly
     locales = ["en-US", "en-US", "en-US", "en-GB", "en-CA"]  # weighted toward en-US
 
-    context = browser.new_context(
+    ctx_kwargs = dict(
         user_agent=ua,
         viewport=viewport,
         locale=random.choice(locales),
@@ -212,6 +221,12 @@ def create_stealth_context(browser, config: dict):
             "America/Chicago", "America/New_York",
         ]),
     )
+
+    proxy = get_tor_proxy(config)
+    if proxy:
+        ctx_kwargs["proxy"] = proxy
+
+    context = browser.new_context(**ctx_kwargs)
 
     # Add some stealth JavaScript to mask automation
     context.add_init_script("""

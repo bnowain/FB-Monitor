@@ -50,6 +50,7 @@ from tracker import (
 from stealth import (
     jittered_interval, human_delay, human_scroll,
     create_stealth_context, stealth_goto, RateLimiter,
+    get_tor_proxy,
 )
 from sessions import (
     interactive_login, create_session_context, get_account_for_page,
@@ -78,6 +79,54 @@ def load_config() -> dict:
 
 def slugify(text: str) -> str:
     return re.sub(r'[^\w]+', '_', text.lower()).strip('_')
+
+
+# ---------------------------------------------------------------------------
+# Tor verification
+# ---------------------------------------------------------------------------
+
+def verify_tor_connection(config: dict) -> bool:
+    """
+    Verify the Tor SOCKS proxy is reachable by launching a headless browser
+    through it and checking our IP via the Tor Project's check page.
+    Returns True if traffic is routed through Tor.
+    """
+    proxy = get_tor_proxy(config)
+    if not proxy:
+        return False
+
+    log.info("Verifying Tor connection...")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                proxy=proxy,
+            )
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto("https://check.torproject.org/api", timeout=30000)
+            body = page.inner_text("body")
+            page.close()
+            context.close()
+            browser.close()
+
+            import json as _json
+            result = _json.loads(body)
+            is_tor = result.get("IsTor", False)
+            ip = result.get("IP", "unknown")
+
+            if is_tor:
+                log.info(f"Tor connection verified — exit IP: {ip}")
+            else:
+                log.warning(f"Connected but NOT through Tor — IP: {ip}")
+
+            return is_tor
+
+    except Exception as e:
+        log.error(f"Tor connection failed: {e}")
+        log.error("Make sure Tor is running (e.g. 'sudo systemctl start tor' or 'tor &')")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +516,7 @@ def main():
     parser.add_argument("--login", type=str, metavar="ACCOUNT", help="Log in to an account (opens browser)")
     parser.add_argument("--accounts", action="store_true", help="List saved account sessions")
     parser.add_argument("--logout", type=str, metavar="ACCOUNT", help="Delete a saved account session")
+    parser.add_argument("--tor", action="store_true", help="Route all traffic through Tor (SOCKS5 on 127.0.0.1:9050)")
     parser.add_argument("--config", type=str, default=str(CONFIG_PATH), help="Path to config file")
     args = parser.parse_args()
 
@@ -478,6 +528,12 @@ def main():
         sys.exit(1)
 
     config = load_config()
+
+    # --- Tor override from CLI ---
+    if args.tor:
+        config.setdefault("tor", {})
+        config["tor"]["enabled"] = True
+        config["tor"].setdefault("socks_port", 9050)
 
     # --- Account management (no config needed) ---
 
@@ -548,6 +604,12 @@ def main():
                 print(f"Removed: {f}")
         print("State cleared.")
         return
+
+    # --- Verify Tor connection if enabled ---
+    if config.get("tor", {}).get("enabled", False):
+        if not verify_tor_connection(config):
+            log.error("Aborting: Tor is enabled but connection could not be verified.")
+            sys.exit(1)
 
     if args.watch:
         interval = config.get("check_interval_minutes", 15)

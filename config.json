@@ -25,6 +25,10 @@
   "max_requests_per_hour": 30,
   "output_dir": "downloads",
   "headless": true,
+  "tor": {
+    "enabled": false,
+    "socks_port": 9050
+  },
   "notifications": {
     "enabled": false,
     "discord_webhook_url": "",

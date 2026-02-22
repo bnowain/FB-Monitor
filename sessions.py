@@ -18,7 +18,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright, BrowserContext
 
-from stealth import create_stealth_context
+from stealth import create_stealth_context, get_tor_proxy
 
 log = logging.getLogger("fb-monitor")
 
@@ -115,11 +115,14 @@ def create_session_context(
         should close the context when done. Persistent contexts
         are the browser itself, so closing works differently.
     """
+    proxy = get_tor_proxy(config)
+
     if account_name == "anonymous" or not account_name:
         # Fresh context, no saved session
-        browser = browser_or_pw.chromium.launch(
-            headless=config.get("headless", True),
-        )
+        launch_kwargs = {"headless": config.get("headless", True)}
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+        browser = browser_or_pw.chromium.launch(**launch_kwargs)
         context = create_stealth_context(browser, config)
         return context, browser, True
 
@@ -138,13 +141,17 @@ def create_session_context(
     ua = random_user_agent()
     viewport = random_viewport()
 
-    context = browser_or_pw.chromium.launch_persistent_context(
+    persistent_kwargs = dict(
         user_data_dir=str(profile_dir),
         headless=config.get("headless", True),
         viewport=viewport,
         user_agent=ua,
         locale="en-US",
     )
+    if proxy:
+        persistent_kwargs["proxy"] = proxy
+
+    context = browser_or_pw.chromium.launch_persistent_context(**persistent_kwargs)
 
     # Add stealth scripts
     context.add_init_script("""
