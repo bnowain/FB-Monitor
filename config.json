@@ -1,5 +1,11 @@
 {
-  "pages": [],
+  "pages": [
+    {
+      "name": "Vote Kevin Crye",
+      "url": "https://www.facebook.com/votekevincrye",
+      "enabled": true
+    }
+  ],
   "default_account": "anonymous",
   "check_interval_minutes": 15,
   "comment_tracking_hours": 24,
