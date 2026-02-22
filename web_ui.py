@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 
@@ -575,6 +576,55 @@ async def skip_download(media_id: int):
 # Import queue (URL backfill)
 # ---------------------------------------------------------------------------
 
+# Patterns that identify Facebook post/content URLs
+_FB_URL_RE = re.compile(
+    r'https?://(?:www\.|m\.|mbasic\.)?facebook\.com/'
+    r'(?:'
+    r'[^/\s]+/posts/[\w.]+'            # /page/posts/id
+    r'|permalink\.php\?[^\s"\'<>]+'     # permalink.php?story_fbid=...
+    r'|[^/\s]+/photos/[^\s"\'<>]+'      # /page/photos/...
+    r'|[^/\s]+/videos/[\w.]+'           # /page/videos/id
+    r'|watch/[^\s"\'<>]+'               # /watch/?v=...
+    r'|reel/[\w.]+'                      # /reel/id
+    r'|share/[^\s"\'<>]+'               # /share/...
+    r'|story\.php\?[^\s"\'<>]+'         # story.php?...
+    r'|photo[./][^\s"\'<>]+'            # /photo/... or /photo.php?...
+    r')',
+    re.IGNORECASE,
+)
+
+
+def extract_fb_urls(raw_text: str) -> list[str]:
+    """
+    Extract and deduplicate Facebook post URLs from any raw text.
+
+    Handles messy input: console logs, JSON, HTML, mixed prose, etc.
+    Strips query params (except for permalink.php/story.php which need them),
+    deduplicates, and returns clean URLs.
+    """
+    matches = _FB_URL_RE.findall(raw_text)
+
+    cleaned = []
+    seen = set()
+    for url in matches:
+        # Strip trailing punctuation/quotes that regex may have grabbed
+        url = url.rstrip('",\'<>);]}\\ \t\n\r')
+
+        # For permalink.php and story.php, keep query params (they contain the post ID)
+        # For everything else, strip query params
+        if 'permalink.php' not in url and 'story.php' not in url and 'photo.php' not in url:
+            url = url.split('?')[0]
+
+        # Normalize trailing slash
+        url = url.rstrip('/')
+
+        if url not in seen:
+            seen.add(url)
+            cleaned.append(url)
+
+    return cleaned
+
+
 @app.get("/import", response_class=HTMLResponse)
 async def import_page(request: Request, status: str = "pending", message: str = "", message_type: str = ""):
     if status not in ("pending", "scraped", "failed", "duplicate"):
@@ -598,15 +648,19 @@ async def import_add_urls(
     urls: str = Form(""),
     page_name: str = Form(""),
 ):
-    url_list = [u.strip() for u in urls.strip().splitlines() if u.strip()]
+    # Extract valid Facebook URLs from whatever the user pasted
+    url_list = extract_fb_urls(urls)
 
     if not url_list:
-        return RedirectResponse("/import?message=No+URLs+provided&message_type=error", status_code=303)
+        return RedirectResponse(
+            "/import?message=No+Facebook+URLs+found+in+input&message_type=error",
+            status_code=303,
+        )
 
     added = db.add_import_urls(url_list, page_name=page_name)
     skipped = len(url_list) - added
 
-    msg = f"Added+{added}+URL(s)+to+import+queue"
+    msg = f"Extracted+{len(url_list)}+URLs,+added+{added}+to+queue"
     if skipped:
         msg += f"+({skipped}+already+queued)"
 
@@ -714,37 +768,48 @@ async def api_import_urls(request: Request, page_name: str = Query("")):
     """
     Bulk import URLs via API.
 
-    Accepts:
-    - text/plain body: one URL per line
-    - application/json body: {"urls": [...], "page_name": "..."}
+    Accepts any raw text — console output, log files, JSON, HTML, plain URLs.
+    Facebook post URLs are automatically extracted, cleaned, and deduplicated.
 
     Usage:
-        curl -X POST http://localhost:8000/api/import -H "Content-Type: text/plain" --data-binary @urls.txt
+        curl -X POST http://localhost:8000/api/import --data-binary @urls.txt
+        curl -X POST http://localhost:8000/api/import --data-binary @console_output.txt
+        curl -X POST http://localhost:8000/api/import?page_name=MyPage --data-binary @urls.txt
         curl -X POST http://localhost:8000/api/import -H "Content-Type: application/json" \
              -d '{"urls": ["https://facebook.com/page/posts/123"], "page_name": "My Page"}'
     """
     content_type = request.headers.get("content-type", "")
     body = await request.body()
+    text = body.decode("utf-8", errors="ignore")
 
     if "application/json" in content_type:
         try:
-            data = json.loads(body)
+            data = json.loads(text)
         except json.JSONDecodeError:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-        url_list = data.get("urls", [])
-        page_name = data.get("page_name", page_name)
+        # If structured JSON with "urls" list, extract from each; otherwise treat whole blob as raw text
+        if isinstance(data.get("urls"), list):
+            raw = "\n".join(str(u) for u in data["urls"])
+        else:
+            raw = text
+        page_name = data.get("page_name", page_name) if isinstance(data, dict) else page_name
     else:
-        # Treat as plain text — one URL per line
-        text = body.decode("utf-8", errors="ignore")
-        url_list = [u.strip() for u in text.splitlines() if u.strip()]
+        raw = text
+
+    url_list = extract_fb_urls(raw)
 
     if not url_list:
-        return JSONResponse({"error": "No URLs provided"}, status_code=400)
+        return JSONResponse({"error": "No Facebook URLs found in input"}, status_code=400)
 
     added = db.add_import_urls(url_list, page_name=page_name)
     skipped = len(url_list) - added
 
-    return {"added": added, "skipped": skipped, "total_submitted": len(url_list)}
+    return {
+        "extracted": len(url_list),
+        "added": added,
+        "skipped": skipped,
+        "urls": url_list,
+    }
 
 
 @app.get("/api/categories")

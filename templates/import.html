@@ -3,15 +3,15 @@
 {% block content %}
 <h1>Import Post URLs</h1>
 <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
-    Paste Facebook post URLs below (one per line). The anonymous scraper will fetch each post on its next run.
+    Paste raw text below — console output, log files, anything. Facebook URLs are automatically extracted and queued for the anonymous Tor scraper.
 </p>
 
 <div class="card">
     <form method="post" action="/import/add">
         <div style="margin-bottom: 0.75rem;">
-            <label style="font-size: 0.85rem; color: var(--text-dim);">Post URLs (one per line)</label>
-            <textarea name="urls" rows="6"
-                placeholder="https://www.facebook.com/pagename/posts/123456&#10;https://www.facebook.com/pagename/posts/789012"
+            <label style="font-size: 0.85rem; color: var(--text-dim);">Paste raw text (URLs are extracted automatically)</label>
+            <textarea name="urls" rows="8"
+                placeholder="Paste anything — raw URLs, console output, log files...&#10;&#10;Facebook post URLs will be automatically found, cleaned, and deduplicated."
                 style="width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text);
                        padding: 0.75rem; border-radius: 6px; font-size: 0.9rem; font-family: monospace;
                        resize: vertical;"></textarea>
@@ -58,10 +58,19 @@ console.log(`Found ${urls.length} post URLs:`);
 copy(urls.join('\n'));
 console.log(urls.join('\n'));
 console.log('Copied to clipboard!');</code></pre>
-        <p><strong>Step 4:</strong> Paste the copied URLs into the text area above, or save to a file and use the API:</p>
+        <p><strong>Step 4:</strong> The URLs are copied to your clipboard. You can either:</p>
+        <ul style="margin: 0.5rem 0; padding-left: 1.5rem;">
+            <li>Paste directly into the text area above</li>
+            <li>Save the console output to a file and pipe it in via the API:</li>
+        </ul>
         <pre style="background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
                     padding: 0.75rem; margin: 0.75rem 0; overflow-x: auto; font-size: 0.82rem;
-                    line-height: 1.5;"><code>curl -X POST http://localhost:8000/api/import -H "Content-Type: text/plain" --data-binary @urls.txt</code></pre>
+                    line-height: 1.5;"><code># Pipe a file of URLs (or raw console output — it extracts the URLs automatically)
+curl -X POST http://localhost:8000/api/import --data-binary @urls.txt
+
+# Optionally tag with a page name
+curl -X POST "http://localhost:8000/api/import?page_name=Vote+Kevin+Crye" --data-binary @urls.txt</code></pre>
+        <p style="font-size: 0.85rem;">The importer accepts any messy input — it finds Facebook URLs in whatever you throw at it.</p>
     </div>
 </details>
 
