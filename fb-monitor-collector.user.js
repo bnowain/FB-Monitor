@@ -76,14 +76,6 @@
   });
 
   // --- Expand logic ---
-  const EXPAND_SELECTORS = [
-    // "See more" on post text
-    'div[role="button"] span:not([class])',
-    // "View more comments"
-    'div[role="button"]',
-    // Reply expanders
-    'span[role="button"]',
-  ];
 
   const EXPAND_TEXT_PATTERNS = [
     /^see more$/i,
@@ -95,17 +87,30 @@
     /^view \d+ repl(y|ies)$/i,
     /^see all$/i,
     /^view all \d+ comments$/i,
+    /^view \d+ previous comments?$/i,
+    /^view previous comments?$/i,
+  ];
+
+  // Patterns to match the clickable comment count at the bottom of a post
+  // (e.g. "5 Comments", "12 Comments") — clicking opens the comment section
+  const COMMENT_COUNT_PATTERNS = [
+    /^\d+\s+comments?$/i,
+  ];
+
+  // Patterns to match the "Most relevant" filter to switch to "All comments"
+  const FILTER_PATTERNS = [
+    /^most relevant$/i,
+    /^newest$/i,
   ];
 
   function isExpandButton(el) {
     const text = (el.textContent || '').trim();
-    if (text.length > 50) return false;
+    if (text.length > 60) return false;
     return EXPAND_TEXT_PATTERNS.some(pattern => pattern.test(text));
   }
 
   function findExpandButtons() {
     const buttons = [];
-    // Query for role="button" elements
     document.querySelectorAll('div[role="button"], span[role="button"]').forEach(el => {
       if (el.offsetParent !== null && isExpandButton(el)) {
         buttons.push(el);
@@ -114,13 +119,105 @@
     return buttons;
   }
 
+  function findCommentCountButtons() {
+    // Find "X Comments" spans/divs at the bottom of posts that open comments
+    const buttons = [];
+    document.querySelectorAll('div[role="button"], span[role="button"]').forEach(el => {
+      if (el.offsetParent === null) return;
+      const text = (el.textContent || '').trim();
+      if (COMMENT_COUNT_PATTERNS.some(p => p.test(text))) {
+        buttons.push(el);
+      }
+    });
+    return buttons;
+  }
+
+  function findFilterMenus() {
+    // Find "Most relevant" filter buttons to switch to "All comments"
+    const buttons = [];
+    document.querySelectorAll('div[role="button"], span[role="button"]').forEach(el => {
+      if (el.offsetParent === null) return;
+      const text = (el.textContent || '').trim();
+      if (FILTER_PATTERNS.some(p => p.test(text))) {
+        buttons.push(el);
+      }
+    });
+    return buttons;
+  }
+
+  async function switchToAllComments() {
+    // Click "Most relevant" to open the menu, then pick "All comments"
+    const filters = findFilterMenus();
+    let switched = 0;
+    for (const filterBtn of filters) {
+      try {
+        filterBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await sleep(300);
+        filterBtn.click();
+        await sleep(1000);
+
+        // Look for the "All comments" option in the dropdown/menu
+        const menuItems = document.querySelectorAll(
+          'div[role="menuitem"], div[role="option"], div[role="menu"] div[role="button"]'
+        );
+        for (const item of menuItems) {
+          if (/all comments/i.test(item.textContent?.trim())) {
+            item.click();
+            switched++;
+            await sleep(1500);
+            break;
+          }
+        }
+
+        // If no menuitem found, try any visible element with "All comments" text
+        if (switched === 0) {
+          document.querySelectorAll('span, div').forEach(el => {
+            if (el.offsetParent !== null && /^all comments$/i.test(el.textContent?.trim())) {
+              el.click();
+              switched++;
+            }
+          });
+          if (switched > 0) await sleep(1500);
+        }
+      } catch (e) {}
+    }
+    return switched;
+  }
+
   async function expandAllVisible() {
     const status = document.getElementById('fbm-status');
-    status.textContent = 'Expanding...';
-
     let totalClicked = 0;
+
+    // Step 1: Click comment count links to open comment sections
+    status.textContent = 'Opening comment sections...';
+    const commentBtns = findCommentCountButtons();
+    for (const btn of commentBtns) {
+      try {
+        btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await sleep(300);
+        btn.click();
+        totalClicked++;
+        expandCount++;
+        document.getElementById('fbm-expand-count').textContent = expandCount;
+        await sleep(EXPAND_DELAY_MS + Math.random() * 500);
+      } catch (e) {}
+    }
+    if (commentBtns.length > 0) await sleep(2000);
+
+    // Step 2: Switch comment filters from "Most relevant" to "All comments"
+    status.textContent = 'Switching to all comments...';
+    const switched = await switchToAllComments();
+    totalClicked += switched;
+    if (switched > 0) {
+      expandCount += switched;
+      document.getElementById('fbm-expand-count').textContent = expandCount;
+      await sleep(2000);
+    }
+
+    // Step 3: Expand everything — "See more", "View more comments", replies
+    status.textContent = 'Expanding threads...';
     let round = 0;
-    const maxRounds = 30;
+    const maxRounds = 50;
 
     while (round < maxRounds) {
       const buttons = findExpandButtons();
@@ -135,17 +232,14 @@
           expandCount++;
           document.getElementById('fbm-expand-count').textContent = expandCount;
           await sleep(EXPAND_DELAY_MS + Math.random() * 500);
-        } catch (e) {
-          // Element may have been removed after click
-        }
+        } catch (e) {}
       }
       round++;
-      // Wait for new content to load
       await sleep(1500);
     }
 
     status.textContent = totalClicked > 0
-      ? `Expanded ${totalClicked} items`
+      ? `Expanded ${totalClicked} items (${round} rounds)`
       : 'Nothing to expand';
 
     return totalClicked;
