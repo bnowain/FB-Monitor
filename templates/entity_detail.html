@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}{{ entity.name }} - FB Monitor{% endblock %}
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/entities" style="color: var(--text-dim); font-size: 0.85rem;">&larr; Back to entities</a>
+</div>
+
+<div class="card">
+    <form method="post" action="/entities/{{ entity.id }}/update" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
+            <input type="text" name="name" value="{{ entity.name }}" required
+                   style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 1.1rem; font-weight: 600; flex: 1;">
+            <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Save</button>
+        </div>
+        <textarea name="description" placeholder="Description..." rows="2"
+                  style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem; resize: vertical;">{{ entity.description or '' }}</textarea>
+    </form>
+    <div style="margin-top: 0.75rem; text-align: right;">
+        <form method="post" action="/entities/{{ entity.id }}/delete" style="display: inline;"
+              onsubmit="return confirm('Delete {{ entity.name }}? This removes all page/people links.')">
+            <button type="submit" style="background: none; color: var(--red); border: 1px solid var(--red); padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">Delete Entity</button>
+        </form>
+    </div>
+</div>
+
+<!-- Linked Pages -->
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Pages ({{ pages|length }})</h2>
+<div class="card">
+    {% for page in pages %}
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+        <a href="/posts?page_name={{ page.page_name | urlencode }}">{{ page.page_name }}</a>
+        <form method="post" action="/entities/{{ entity.id }}/unlink-page" style="display: inline;">
+            <input type="hidden" name="page_name" value="{{ page.page_name }}">
+            <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
+        </form>
+    </div>
+    {% endfor %}
+
+    <form method="post" action="/entities/{{ entity.id }}/link-page" style="display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
+        <select name="page_name" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="">Select page...</option>
+            {% for name in all_page_names %}
+            <option value="{{ name }}">{{ name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Link Page</button>
+    </form>
+</div>
+
+<!-- Linked People -->
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">People ({{ people|length }})</h2>
+<div class="card">
+    {% for person in people %}
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+        <div>
+            <a href="/people/{{ person.id }}">{{ person.name }}</a>
+            <span style="color: var(--text-dim); font-size: 0.8rem; margin-left: 0.5rem;">[{{ person.role }}]</span>
+        </div>
+        <form method="post" action="/entities/{{ entity.id }}/unlink-person" style="display: inline;">
+            <input type="hidden" name="person_id" value="{{ person.id }}">
+            <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
+        </form>
+    </div>
+    {% endfor %}
+
+    <form method="post" action="/entities/{{ entity.id }}/link-person" style="display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
+        <select name="person_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="">Select person...</option>
+            {% for p in all_people %}
+            <option value="{{ p.id }}">{{ p.name }}</option>
+            {% endfor %}
+        </select>
+        <select name="role" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="member">Member</option>
+            <option value="director">Director</option>
+            <option value="employee">Employee</option>
+            <option value="spokesperson">Spokesperson</option>
+            <option value="associated">Associated</option>
+        </select>
+        <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Link Person</button>
+    </form>
+</div>
+
+<!-- Recent posts from this entity's pages -->
+{% if posts %}
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Recent Posts from Entity Pages</h2>
+{% for post in posts %}
+<a href="/posts/{{ post.post_id | urlencode }}" style="text-decoration: none; color: inherit;">
+    <div class="card post-card">
+        <div class="meta">
+            <span class="page-name">{{ post.page_name }}</span>
+            <span>{{ post.detected_at[:16] }}</span>
+            {% if post.author %}<span>by {{ post.author }}</span>{% endif %}
+        </div>
+        <div class="text-preview">{{ post.text[:200] }}{% if post.text and post.text|length > 200 %}...{% endif %}</div>
+    </div>
+</a>
+{% endfor %}
+<div style="text-align: center; margin-top: 0.5rem;">
+    <a href="/posts?entity_id={{ entity.id }}" style="font-size: 0.85rem;">View all posts from this entity &rarr;</a>
+</div>
+{% endif %}
+{% endblock %}

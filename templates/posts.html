@@ -11,8 +11,20 @@
         <option value="{{ name }}" {% if name == page_name %}selected{% endif %}>{{ name }}</option>
         {% endfor %}
     </select>
+    <select name="category_id">
+        <option value="0">All categories</option>
+        {% for cat in categories %}
+        <option value="{{ cat.id }}" {% if cat.id == category_id %}selected{% endif %}>{{ cat.name }}</option>
+        {% endfor %}
+    </select>
+    <select name="entity_id">
+        <option value="0">All entities</option>
+        {% for ent in entities %}
+        <option value="{{ ent.id }}" {% if ent.id == entity_id %}selected{% endif %}>{{ ent.name }}</option>
+        {% endfor %}
+    </select>
     <button type="submit">Filter</button>
-    {% if search or page_name %}
+    {% if search or page_name or category_id or entity_id %}
     <a href="/posts" style="padding: 0.5rem; color: var(--text-dim); font-size: 0.85rem;">Clear</a>
     {% endif %}
 </form>
@@ -32,6 +44,9 @@
         {% endif %}
         <div class="text-preview">{{ post.text[:300] }}{% if post.text|length > 300 %}...{% endif %}</div>
         <div class="attachment-badges">
+            {% for cat in post.categories %}
+            <span class="badge" style="background: {{ cat.color }}22; color: {{ cat.color }};">{{ cat.name }}</span>
+            {% endfor %}
             {% if post.attachment_counts.images %}
             <span class="badge badge-image">{{ post.attachment_counts.images }} image{{ "s" if post.attachment_counts.images != 1 }}</span>
             {% endif %}
@@ -48,7 +63,7 @@
 
 {% if posts|length >= 50 %}
 <div style="text-align: center; padding: 1rem;">
-    <a href="/posts?offset={{ offset + 50 }}{% if search %}&search={{ search }}{% endif %}{% if page_name %}&page_name={{ page_name }}{% endif %}">Load more</a>
+    <a href="/posts?offset={{ offset + 50 }}{% if search %}&search={{ search }}{% endif %}{% if page_name %}&page_name={{ page_name }}{% endif %}{% if category_id %}&category_id={{ category_id }}{% endif %}{% if entity_id %}&entity_id={{ entity_id }}{% endif %}">Load more</a>
 </div>
 {% endif %}
 

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Categories - FB Monitor{% endblock %}
+{% block content %}
+<h1>Categories</h1>
+<p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 1.5rem;">
+    Categories classify posts. Tag posts from their detail page, then filter by category on the posts list.
+</p>
+
+<form method="post" action="/categories/create" style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem; align-items: center; flex-wrap: wrap;">
+    <input type="text" name="name" placeholder="Category name" required
+           style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+    <input type="text" name="description" placeholder="Description (optional)"
+           style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+    <input type="color" name="color" value="#4f8ff7"
+           style="width: 40px; height: 36px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--surface2);">
+    <button type="submit" style="background: var(--green); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">+ Add Category</button>
+</form>
+
+{% if categories %}
+{% for cat in categories %}
+<div class="card" style="display: flex; justify-content: space-between; align-items: center;">
+    <form method="post" action="/categories/{{ cat.id }}/update" style="display: flex; gap: 0.5rem; align-items: center; flex: 1; flex-wrap: wrap;">
+        <span style="width: 12px; height: 12px; border-radius: 50%; background: {{ cat.color }}; display: inline-block;"></span>
+        <input type="text" name="name" value="{{ cat.name }}" required
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.95rem; font-weight: 600;">
+        <input type="text" name="description" value="{{ cat.description or '' }}" placeholder="Description"
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem; flex: 1;">
+        <input type="color" name="color" value="{{ cat.color }}"
+               style="width: 36px; height: 32px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--surface2);">
+        <span style="color: var(--text-dim); font-size: 0.85rem;">
+            <a href="/posts?category_id={{ cat.id }}">{{ cat.post_count }} post{{ "s" if cat.post_count != 1 }}</a>
+        </span>
+        <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.35rem 0.65rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">Save</button>
+    </form>
+    <form method="post" action="/categories/{{ cat.id }}/delete" style="margin-left: 0.5rem;"
+          onsubmit="return confirm('Delete category {{ cat.name }}?')">
+        <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">delete</button>
+    </form>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>No categories yet. Add one above to start classifying posts.</p>
+</div>
+{% endif %}
+{% endblock %}

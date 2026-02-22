@@ -47,12 +47,19 @@ async def posts_list(
     request: Request,
     page_name: str = Query("", alias="page_name"),
     search: str = Query(""),
+    category_id: int = Query(0),
+    entity_id: int = Query(0),
     offset: int = Query(0),
 ):
-    posts = db.get_posts(page_name=page_name, search=search, offset=offset)
+    posts = db.get_posts(
+        page_name=page_name, search=search,
+        category_id=category_id, entity_id=entity_id, offset=offset,
+    )
     page_names = db.get_page_names()
+    categories = db.get_categories()
+    entities = db.get_entities()
 
-    # Enrich each post with attachment counts and comment count
+    # Enrich each post with attachment counts, comment count, and categories
     conn = db.get_connection()
     for post in posts:
         pid = post["post_id"]
@@ -67,6 +74,7 @@ async def posts_list(
         ).fetchone()[0]
         post["attachment_counts"] = {"images": img_count, "videos": vid_count}
         post["comment_count"] = comment_count
+        post["categories"] = db.get_categories_for_post(pid)
     conn.close()
 
     return templates.TemplateResponse("posts.html", {
@@ -75,6 +83,10 @@ async def posts_list(
         "page_names": page_names,
         "page_name": page_name,
         "search": search,
+        "category_id": category_id,
+        "entity_id": entity_id,
+        "categories": categories,
+        "entities": entities,
         "offset": offset,
         "active_page": "posts",
     })
@@ -99,6 +111,8 @@ async def post_detail(request: Request, post_id: str):
 
     linked_people = db.get_people_for_post(post_id)
     all_people = db.get_people()
+    post_categories = db.get_categories_for_post(post_id)
+    all_categories = db.get_categories()
 
     return templates.TemplateResponse("post_detail.html", {
         "request": request,
@@ -108,6 +122,8 @@ async def post_detail(request: Request, post_id: str):
         "links": links,
         "linked_people": linked_people,
         "all_people": all_people,
+        "post_categories": post_categories,
+        "all_categories": all_categories,
         "active_page": "posts",
     })
 
@@ -163,6 +179,8 @@ async def person_detail(request: Request, person_id: int):
     posts = db.get_person_posts(person_id)
     comments = db.get_person_comments(person_id)
     all_page_names = db.get_page_names()
+    person_entities = db.get_entities_for_person(person_id)
+    all_entities = db.get_entities()
 
     return templates.TemplateResponse("person_detail.html", {
         "request": request,
@@ -171,6 +189,8 @@ async def person_detail(request: Request, person_id: int):
         "posts": posts,
         "comments": comments,
         "all_page_names": all_page_names,
+        "person_entities": person_entities,
+        "all_entities": all_entities,
         "active_page": "people",
     })
 
@@ -239,6 +259,215 @@ async def unlink_person_from_post_route(
 
 
 # ---------------------------------------------------------------------------
+# Post category tagging
+# ---------------------------------------------------------------------------
+
+@app.post("/posts/{post_id}/tag-category")
+async def tag_post_with_category(
+    post_id: str,
+    category_id: int = Form(...),
+):
+    db.tag_post_category(post_id, category_id)
+    return RedirectResponse(f"/posts/{post_id}", status_code=303)
+
+
+@app.post("/posts/{post_id}/untag-category")
+async def untag_post_category_route(
+    post_id: str,
+    category_id: int = Form(...),
+):
+    db.untag_post_category(post_id, category_id)
+    return RedirectResponse(f"/posts/{post_id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Entities (HTML)
+# ---------------------------------------------------------------------------
+
+@app.get("/entities", response_class=HTMLResponse)
+async def entities_list(request: Request, search: str = ""):
+    entities = db.get_entities(search=search)
+
+    conn = db.get_connection()
+    for entity in entities:
+        eid = entity["id"]
+        entity["page_count"] = conn.execute(
+            "SELECT COUNT(*) FROM entity_pages WHERE entity_id=?", (eid,)
+        ).fetchone()[0]
+        entity["people_count"] = conn.execute(
+            "SELECT COUNT(*) FROM entity_people WHERE entity_id=?", (eid,)
+        ).fetchone()[0]
+    conn.close()
+
+    return templates.TemplateResponse("entities.html", {
+        "request": request,
+        "entities": entities,
+        "search": search,
+        "active_page": "entities",
+    })
+
+
+@app.post("/entities/create")
+async def create_entity_route(
+    name: str = Form(...),
+    description: str = Form(""),
+):
+    db.create_entity(name, description)
+    return RedirectResponse("/entities", status_code=303)
+
+
+@app.get("/entities/{entity_id}", response_class=HTMLResponse)
+async def entity_detail(request: Request, entity_id: int):
+    entity = db.get_entity(entity_id)
+    if not entity:
+        return HTMLResponse("<h1>Entity not found</h1>", status_code=404)
+
+    pages = db.get_entity_pages(entity_id)
+    people = db.get_entity_people(entity_id)
+    all_page_names = db.get_page_names()
+    all_people = db.get_people()
+
+    # Get posts from entity's linked pages
+    entity_posts = db.get_posts(entity_id=entity_id, limit=20)
+
+    return templates.TemplateResponse("entity_detail.html", {
+        "request": request,
+        "entity": entity,
+        "pages": pages,
+        "people": people,
+        "posts": entity_posts,
+        "all_page_names": all_page_names,
+        "all_people": all_people,
+        "active_page": "entities",
+    })
+
+
+@app.post("/entities/{entity_id}/update")
+async def update_entity_route(
+    entity_id: int,
+    name: str = Form(...),
+    description: str = Form(""),
+):
+    db.update_entity(entity_id, name=name, description=description)
+    return RedirectResponse(f"/entities/{entity_id}", status_code=303)
+
+
+@app.post("/entities/{entity_id}/delete")
+async def delete_entity_route(entity_id: int):
+    db.delete_entity(entity_id)
+    return RedirectResponse("/entities", status_code=303)
+
+
+@app.post("/entities/{entity_id}/link-page")
+async def entity_link_page(
+    entity_id: int,
+    page_name: str = Form(...),
+):
+    db.link_entity_to_page(entity_id, page_name)
+    return RedirectResponse(f"/entities/{entity_id}", status_code=303)
+
+
+@app.post("/entities/{entity_id}/unlink-page")
+async def entity_unlink_page(
+    entity_id: int,
+    page_name: str = Form(...),
+):
+    db.unlink_entity_from_page(entity_id, page_name)
+    return RedirectResponse(f"/entities/{entity_id}", status_code=303)
+
+
+@app.post("/entities/{entity_id}/link-person")
+async def entity_link_person(
+    entity_id: int,
+    person_id: int = Form(...),
+    role: str = Form("member"),
+):
+    db.link_entity_to_person(entity_id, person_id, role)
+    return RedirectResponse(f"/entities/{entity_id}", status_code=303)
+
+
+@app.post("/entities/{entity_id}/unlink-person")
+async def entity_unlink_person(
+    entity_id: int,
+    person_id: int = Form(...),
+):
+    db.unlink_entity_from_person(entity_id, person_id)
+    return RedirectResponse(f"/entities/{entity_id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Categories (HTML)
+# ---------------------------------------------------------------------------
+
+@app.get("/categories", response_class=HTMLResponse)
+async def categories_list(request: Request):
+    categories = db.get_categories()
+
+    conn = db.get_connection()
+    for cat in categories:
+        cat["post_count"] = conn.execute(
+            "SELECT COUNT(*) FROM post_categories WHERE category_id=?", (cat["id"],)
+        ).fetchone()[0]
+    conn.close()
+
+    return templates.TemplateResponse("categories.html", {
+        "request": request,
+        "categories": categories,
+        "active_page": "categories",
+    })
+
+
+@app.post("/categories/create")
+async def create_category_route(
+    name: str = Form(...),
+    description: str = Form(""),
+    color: str = Form("#4f8ff7"),
+):
+    db.create_category(name, description, color)
+    return RedirectResponse("/categories", status_code=303)
+
+
+@app.post("/categories/{category_id}/update")
+async def update_category_route(
+    category_id: int,
+    name: str = Form(...),
+    description: str = Form(""),
+    color: str = Form("#4f8ff7"),
+):
+    db.update_category(category_id, name=name, description=description, color=color)
+    return RedirectResponse("/categories", status_code=303)
+
+
+@app.post("/categories/{category_id}/delete")
+async def delete_category_route(category_id: int):
+    db.delete_category(category_id)
+    return RedirectResponse("/categories", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Person-entity linking from person detail
+# ---------------------------------------------------------------------------
+
+@app.post("/people/{person_id}/link-entity")
+async def person_link_entity(
+    person_id: int,
+    entity_id: int = Form(...),
+    role: str = Form("member"),
+):
+    db.link_entity_to_person(entity_id, person_id, role)
+    return RedirectResponse(f"/people/{person_id}", status_code=303)
+
+
+@app.post("/people/{person_id}/unlink-entity")
+async def person_unlink_entity(
+    person_id: int,
+    entity_id: int = Form(...),
+):
+    db.unlink_entity_from_person(entity_id, person_id)
+    return RedirectResponse(f"/people/{person_id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
 # Attachments (serve files)
 # ---------------------------------------------------------------------------
 
@@ -303,7 +532,28 @@ async def api_person(person_id: int):
     person["pages"] = db.get_person_pages(person_id)
     person["posts"] = db.get_person_posts(person_id)
     person["comments"] = db.get_person_comments(person_id)
+    person["entities"] = db.get_entities_for_person(person_id)
     return person
+
+
+@app.get("/api/entities")
+async def api_entities(search: str = ""):
+    return db.get_entities(search=search)
+
+
+@app.get("/api/entities/{entity_id}")
+async def api_entity(entity_id: int):
+    entity = db.get_entity(entity_id)
+    if not entity:
+        return {"error": "not found"}
+    entity["pages"] = db.get_entity_pages(entity_id)
+    entity["people"] = db.get_entity_people(entity_id)
+    return entity
+
+
+@app.get("/api/categories")
+async def api_categories():
+    return db.get_categories()
 
 
 # ---------------------------------------------------------------------------

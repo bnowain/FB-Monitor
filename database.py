@@ -110,6 +110,49 @@ def init_db(db_path: Optional[Path] = None):
             UNIQUE(person_id, comment_id)
         );
 
+        -- Categories for classifying posts (e.g. Profiles, Tracking Pages)
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            color TEXT DEFAULT '#4f8ff7',
+            created_at TEXT NOT NULL
+        );
+
+        -- Link posts to categories (many-to-many)
+        CREATE TABLE IF NOT EXISTS post_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id TEXT NOT NULL REFERENCES posts(post_id),
+            category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+            UNIQUE(post_id, category_id)
+        );
+
+        -- Entities: organizations/groups that tie together pages and people
+        -- e.g. "Shasta County HHSA"
+        CREATE TABLE IF NOT EXISTS entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        -- Link entities to monitored pages
+        CREATE TABLE IF NOT EXISTS entity_pages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            page_name TEXT NOT NULL,
+            UNIQUE(entity_id, page_name)
+        );
+
+        -- Link entities to people
+        CREATE TABLE IF NOT EXISTS entity_people (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+            role TEXT DEFAULT 'member',
+            UNIQUE(entity_id, person_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_posts_page ON posts(page_name);
         CREATE INDEX IF NOT EXISTS idx_posts_detected ON posts(detected_at);
         CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
@@ -119,7 +162,23 @@ def init_db(db_path: Optional[Path] = None):
         CREATE INDEX IF NOT EXISTS idx_people_posts_person ON people_posts(person_id);
         CREATE INDEX IF NOT EXISTS idx_people_posts_post ON people_posts(post_id);
         CREATE INDEX IF NOT EXISTS idx_people_comments_person ON people_comments(person_id);
+        CREATE INDEX IF NOT EXISTS idx_post_categories_post ON post_categories(post_id);
+        CREATE INDEX IF NOT EXISTS idx_post_categories_cat ON post_categories(category_id);
+        CREATE INDEX IF NOT EXISTS idx_entity_pages ON entity_pages(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_entity_people ON entity_people(entity_id);
     """)
+    conn.commit()
+
+    # Seed default categories
+    now = datetime.now(timezone.utc).isoformat()
+    for name, desc, color in [
+        ("Profiles", "Posts related to individual profiles", "#e89b3e"),
+        ("Tracking Pages", "Posts from pages being actively tracked", "#4caf7d"),
+    ]:
+        conn.execute(
+            "INSERT OR IGNORE INTO categories (name, description, color, created_at) VALUES (?, ?, ?, ?)",
+            (name, desc, color, now),
+        )
     conn.commit()
     conn.close()
 
@@ -440,31 +499,324 @@ def get_people_for_page(page_name: str, db_path: Optional[Path] = None) -> list[
 
 
 # ---------------------------------------------------------------------------
+# Category operations
+# ---------------------------------------------------------------------------
+
+def get_categories(db_path: Optional[Path] = None) -> list[dict]:
+    """Get all categories."""
+    conn = get_connection(db_path)
+    rows = conn.execute("SELECT * FROM categories ORDER BY name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_category(category_id: int, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Get a single category."""
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM categories WHERE id=?", (category_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_category(name: str, description: str = "", color: str = "#4f8ff7", db_path: Optional[Path] = None) -> int:
+    """Create a category and return its id."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO categories (name, description, color, created_at) VALUES (?, ?, ?, ?)",
+            (name, description, color, now),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def update_category(category_id: int, name: str = None, description: str = None, color: str = None, db_path: Optional[Path] = None):
+    """Update a category."""
+    conn = get_connection(db_path)
+    fields, params = [], []
+    if name is not None:
+        fields.append("name=?"); params.append(name)
+    if description is not None:
+        fields.append("description=?"); params.append(description)
+    if color is not None:
+        fields.append("color=?"); params.append(color)
+    if not fields:
+        conn.close(); return
+    params.append(category_id)
+    conn.execute(f"UPDATE categories SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+    conn.close()
+
+
+def delete_category(category_id: int, db_path: Optional[Path] = None):
+    """Delete a category (cascade removes post links)."""
+    conn = get_connection(db_path)
+    conn.execute("DELETE FROM categories WHERE id=?", (category_id,))
+    conn.commit()
+    conn.close()
+
+
+def tag_post_category(post_id: str, category_id: int, db_path: Optional[Path] = None):
+    """Tag a post with a category."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT OR IGNORE INTO post_categories (post_id, category_id) VALUES (?, ?)",
+        (post_id, category_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def untag_post_category(post_id: str, category_id: int, db_path: Optional[Path] = None):
+    """Remove a category tag from a post."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "DELETE FROM post_categories WHERE post_id=? AND category_id=?",
+        (post_id, category_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_categories_for_post(post_id: str, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all categories tagged on a post."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT c.*
+        FROM categories c
+        JOIN post_categories pc ON c.id = pc.category_id
+        WHERE pc.post_id = ?
+        ORDER BY c.name
+    """, (post_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_posts_in_category(category_id: int, limit: int = 50, offset: int = 0, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all posts tagged with a category."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT p.*
+        FROM posts p
+        JOIN post_categories pc ON p.post_id = pc.post_id
+        WHERE pc.category_id = ?
+        ORDER BY p.detected_at DESC
+        LIMIT ? OFFSET ?
+    """, (category_id, limit, offset)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Entity operations
+# ---------------------------------------------------------------------------
+
+def get_entities(search: str = "", db_path: Optional[Path] = None) -> list[dict]:
+    """List all entities."""
+    conn = get_connection(db_path)
+    if search:
+        rows = conn.execute(
+            "SELECT * FROM entities WHERE name LIKE ? ORDER BY name",
+            (f"%{search}%",),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM entities ORDER BY name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_entity(entity_id: int, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Get a single entity."""
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_entity(name: str, description: str = "", db_path: Optional[Path] = None) -> int:
+    """Create an entity and return its id."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO entities (name, description, created_at) VALUES (?, ?, ?)",
+            (name, description, now),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def update_entity(entity_id: int, name: str = None, description: str = None, db_path: Optional[Path] = None):
+    """Update an entity."""
+    conn = get_connection(db_path)
+    fields, params = [], []
+    if name is not None:
+        fields.append("name=?"); params.append(name)
+    if description is not None:
+        fields.append("description=?"); params.append(description)
+    if not fields:
+        conn.close(); return
+    params.append(entity_id)
+    conn.execute(f"UPDATE entities SET {', '.join(fields)} WHERE id=?", params)
+    conn.commit()
+    conn.close()
+
+
+def delete_entity(entity_id: int, db_path: Optional[Path] = None):
+    """Delete an entity (cascade removes page/people links)."""
+    conn = get_connection(db_path)
+    conn.execute("DELETE FROM entities WHERE id=?", (entity_id,))
+    conn.commit()
+    conn.close()
+
+
+def link_entity_to_page(entity_id: int, page_name: str, db_path: Optional[Path] = None):
+    """Link an entity to a monitored page."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT OR IGNORE INTO entity_pages (entity_id, page_name) VALUES (?, ?)",
+        (entity_id, page_name),
+    )
+    conn.commit()
+    conn.close()
+
+
+def unlink_entity_from_page(entity_id: int, page_name: str, db_path: Optional[Path] = None):
+    """Remove an entity-page link."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "DELETE FROM entity_pages WHERE entity_id=? AND page_name=?",
+        (entity_id, page_name),
+    )
+    conn.commit()
+    conn.close()
+
+
+def link_entity_to_person(entity_id: int, person_id: int, role: str = "member", db_path: Optional[Path] = None):
+    """Link an entity to a person."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT OR IGNORE INTO entity_people (entity_id, person_id, role) VALUES (?, ?, ?)",
+        (entity_id, person_id, role),
+    )
+    conn.commit()
+    conn.close()
+
+
+def unlink_entity_from_person(entity_id: int, person_id: int, db_path: Optional[Path] = None):
+    """Remove an entity-person link."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "DELETE FROM entity_people WHERE entity_id=? AND person_id=?",
+        (entity_id, person_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_entity_pages(entity_id: int, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all pages linked to an entity."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM entity_pages WHERE entity_id=? ORDER BY page_name",
+        (entity_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_entity_people(entity_id: int, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all people linked to an entity."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT p.*, ep.role
+        FROM people p
+        JOIN entity_people ep ON p.id = ep.person_id
+        WHERE ep.entity_id = ?
+        ORDER BY ep.role, p.name
+    """, (entity_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_entities_for_page(page_name: str, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all entities linked to a page."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT e.*
+        FROM entities e
+        JOIN entity_pages ep ON e.id = ep.entity_id
+        WHERE ep.page_name = ?
+        ORDER BY e.name
+    """, (page_name,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_entities_for_person(person_id: int, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all entities a person belongs to."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT e.*, ep.role
+        FROM entities e
+        JOIN entity_people ep ON e.id = ep.entity_id
+        WHERE ep.person_id = ?
+        ORDER BY e.name
+    """, (person_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
 # Read operations (used by the web UI)
 # ---------------------------------------------------------------------------
 
 def get_posts(
     page_name: str = "",
     search: str = "",
+    category_id: int = 0,
+    entity_id: int = 0,
     limit: int = 50,
     offset: int = 0,
     db_path: Optional[Path] = None,
 ) -> list[dict]:
-    """Fetch posts with optional filtering."""
+    """Fetch posts with optional filtering by page, search, category, or entity."""
     conn = get_connection(db_path)
-    query = "SELECT * FROM posts WHERE 1=1"
+    query = "SELECT DISTINCT p.* FROM posts p"
+    joins = []
+    wheres = []
     params = []
 
+    if category_id:
+        joins.append("JOIN post_categories pc ON p.post_id = pc.post_id")
+        wheres.append("pc.category_id = ?")
+        params.append(category_id)
+
+    if entity_id:
+        joins.append("JOIN entity_pages ep ON p.page_name = ep.page_name")
+        wheres.append("ep.entity_id = ?")
+        params.append(entity_id)
+
     if page_name:
-        query += " AND page_name = ?"
+        wheres.append("p.page_name = ?")
         params.append(page_name)
 
     if search:
-        query += " AND (text LIKE ? OR author LIKE ? OR shared_from LIKE ?)"
+        wheres.append("(p.text LIKE ? OR p.author LIKE ? OR p.shared_from LIKE ?)")
         term = f"%{search}%"
         params.extend([term, term, term])
 
-    query += " ORDER BY detected_at DESC LIMIT ? OFFSET ?"
+    if joins:
+        query += " " + " ".join(joins)
+    if wheres:
+        query += " WHERE " + " AND ".join(wheres)
+
+    query += " ORDER BY p.detected_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     rows = conn.execute(query, params).fetchall()
@@ -524,6 +876,8 @@ def get_stats(db_path: Optional[Path] = None) -> dict:
         "SELECT COUNT(DISTINCT page_name) FROM posts"
     ).fetchone()[0]
     stats["total_people"] = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+    stats["total_entities"] = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+    stats["total_categories"] = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
 
     # Recent activity
     stats["recent_posts"] = [dict(r) for r in conn.execute(

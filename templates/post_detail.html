@@ -43,6 +43,29 @@
         <div class="field-label">Reactions</div>
         <span>{{ post.reaction_count }}</span>
         {% endif %}
+
+        <!-- Categories -->
+        <div class="field-label">Categories</div>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+            {% for cat in post_categories %}
+            <span style="display: inline-flex; align-items: center; gap: 0.3rem;">
+                <span class="badge" style="background: {{ cat.color }}22; color: {{ cat.color }};">{{ cat.name }}</span>
+                <form method="post" action="/posts/{{ post.post_id }}/untag-category" style="display: inline;">
+                    <input type="hidden" name="category_id" value="{{ cat.id }}">
+                    <button type="submit" style="background: none; border: none; color: var(--red); cursor: pointer; font-size: 0.7rem; padding: 0;">x</button>
+                </form>
+            </span>
+            {% endfor %}
+            <form method="post" action="/posts/{{ post.post_id }}/tag-category" style="display: inline-flex; gap: 0.3rem; align-items: center;">
+                <select name="category_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.25rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">
+                    <option value="">+ tag...</option>
+                    {% for cat in all_categories %}
+                    <option value="{{ cat.id }}">{{ cat.name }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Add</button>
+            </form>
+        </div>
     </div>
 
     <!-- Linked People -->

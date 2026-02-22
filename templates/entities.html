@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Entities - FB Monitor{% endblock %}
+{% block content %}
+<h1>Entities</h1>
+<p style="color: var(--text-dim); font-size: 0.9rem; margin-bottom: 1.5rem;">
+    Entities are organizations or groups (e.g. "Shasta County HHSA") that tie together pages and people.
+</p>
+
+<div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; align-items: flex-start;">
+    <form class="filters" method="get" action="/entities" style="margin-bottom: 0;">
+        <input type="text" name="search" placeholder="Search entities..." value="{{ search }}">
+        <button type="submit">Search</button>
+        {% if search %}<a href="/entities" style="padding: 0.5rem; color: var(--text-dim); font-size: 0.85rem;">Clear</a>{% endif %}
+    </form>
+
+    <form method="post" action="/entities/create" style="display: flex; gap: 0.5rem; align-items: center;">
+        <input type="text" name="name" placeholder="Entity name" required
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+        <input type="text" name="description" placeholder="Description (optional)"
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+        <button type="submit" style="background: var(--green); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">+ Add Entity</button>
+    </form>
+</div>
+
+{% if entities %}
+{% for entity in entities %}
+<a href="/entities/{{ entity.id }}" style="text-decoration: none; color: inherit;">
+    <div class="card post-card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <span style="font-weight: 600; font-size: 1.05rem;">{{ entity.name }}</span>
+                {% if entity.description %}
+                <span style="color: var(--text-dim); font-size: 0.85rem; margin-left: 0.75rem;">{{ entity.description }}</span>
+                {% endif %}
+            </div>
+            <div style="display: flex; gap: 0.75rem;">
+                {% if entity.page_count %}
+                <span class="badge" style="background: #2a3a50; color: #6db3f2;">{{ entity.page_count }} page{{ "s" if entity.page_count != 1 }}</span>
+                {% endif %}
+                {% if entity.people_count %}
+                <span class="badge" style="background: #3a2a3a; color: #d48af2;">{{ entity.people_count }} {{ "person" if entity.people_count == 1 else "people" }}</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</a>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>No entities yet. Create one to start grouping pages and people together.</p>
+</div>
+{% endif %}
+{% endblock %}

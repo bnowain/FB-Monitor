@@ -58,6 +58,40 @@
     </form>
 </div>
 
+<!-- Entities -->
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Entities ({{ person_entities|length }})</h2>
+<div class="card">
+    {% for ent in person_entities %}
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+        <div>
+            <a href="/entities/{{ ent.id }}">{{ ent.name }}</a>
+            <span style="color: var(--text-dim); font-size: 0.8rem; margin-left: 0.5rem;">[{{ ent.role }}]</span>
+        </div>
+        <form method="post" action="/people/{{ person.id }}/unlink-entity" style="display: inline;">
+            <input type="hidden" name="entity_id" value="{{ ent.id }}">
+            <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
+        </form>
+    </div>
+    {% endfor %}
+
+    <form method="post" action="/people/{{ person.id }}/link-entity" style="display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
+        <select name="entity_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="">Select entity...</option>
+            {% for ent in all_entities %}
+            <option value="{{ ent.id }}">{{ ent.name }}</option>
+            {% endfor %}
+        </select>
+        <select name="role" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="member">Member</option>
+            <option value="director">Director</option>
+            <option value="employee">Employee</option>
+            <option value="spokesperson">Spokesperson</option>
+            <option value="associated">Associated</option>
+        </select>
+        <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Link</button>
+    </form>
+</div>
+
 <!-- Linked Posts -->
 <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Linked Posts ({{ posts|length }})</h2>
 {% if posts %}
