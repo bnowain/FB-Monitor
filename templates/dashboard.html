@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - FB Monitor{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="number">{{ stats.total_posts }}</div>
+        <div class="label">Posts Captured</div>
+    </div>
+    <div class="stat-card">
+        <div class="number">{{ stats.total_comments }}</div>
+        <div class="label">Comments</div>
+    </div>
+    <div class="stat-card">
+        <div class="number">{{ stats.total_attachments }}</div>
+        <div class="label">Attachments</div>
+    </div>
+    <div class="stat-card">
+        <div class="number">{{ stats.total_pages }}</div>
+        <div class="label">Pages Monitored</div>
+    </div>
+    <div class="stat-card">
+        <div class="number">{{ stats.total_people }}</div>
+        <div class="label"><a href="/people" style="color: inherit;">People Tracked</a></div>
+    </div>
+</div>
+
+{% if stats.posts_per_page %}
+<h2 style="font-size: 1.1rem; margin-bottom: 0.75rem;">Posts by Page</h2>
+<div class="card">
+    {% for row in stats.posts_per_page %}
+    <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid var(--border);">
+        <a href="/posts?page_name={{ row.page_name | urlencode }}">{{ row.page_name }}</a>
+        <span style="color: var(--text-dim);">{{ row.count }} post{{ "s" if row.count != 1 }}</span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if stats.recent_posts %}
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.75rem;">Recent Posts</h2>
+{% for post in stats.recent_posts %}
+<a href="/posts/{{ post.post_id | urlencode }}" style="text-decoration: none; color: inherit;">
+    <div class="card post-card">
+        <div class="meta">
+            <span class="page-name">{{ post.page_name }}</span>
+            <span>{{ post.detected_at[:16] }}</span>
+            {% if post.author %}<span>by {{ post.author }}</span>{% endif %}
+        </div>
+        {% if post.shared_from %}
+        <div class="shared-from">Shared from {{ post.shared_from }}</div>
+        {% endif %}
+        <div class="text-preview">{{ post.text[:200] }}{% if post.text|length > 200 %}...{% endif %}</div>
+    </div>
+</a>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>No posts captured yet. Run the scraper to start collecting data.</p>
+    <code>python fb_monitor.py</code>
+</div>
+{% endif %}
+{% endblock %}

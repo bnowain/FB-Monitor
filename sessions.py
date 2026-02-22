@@ -115,10 +115,9 @@ def create_session_context(
         should close the context when done. Persistent contexts
         are the browser itself, so closing works differently.
     """
-    proxy = get_tor_proxy(config)
-
     if account_name == "anonymous" or not account_name:
-        # Fresh context, no saved session
+        # Fresh context, no saved session — route through Tor if enabled
+        proxy = get_tor_proxy(config)
         launch_kwargs = {"headless": config.get("headless", True)}
         if proxy:
             launch_kwargs["proxy"] = proxy
@@ -126,7 +125,8 @@ def create_session_context(
         context = create_stealth_context(browser, config)
         return context, browser, True
 
-    # Persistent context with saved cookies
+    # Persistent context with saved cookies — never use Tor
+    # (logged-in accounts go direct to avoid triggering verification)
     profile_dir = get_profile_dir(account_name)
 
     if not any(profile_dir.iterdir()):
@@ -141,17 +141,13 @@ def create_session_context(
     ua = random_user_agent()
     viewport = random_viewport()
 
-    persistent_kwargs = dict(
+    context = browser_or_pw.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         headless=config.get("headless", True),
         viewport=viewport,
         user_agent=ua,
         locale="en-US",
     )
-    if proxy:
-        persistent_kwargs["proxy"] = proxy
-
-    context = browser_or_pw.chromium.launch_persistent_context(**persistent_kwargs)
 
     # Add stealth scripts
     context.add_init_script("""

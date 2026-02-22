@@ -23,6 +23,12 @@
   "comment_tracking_hours": 24,
   "comment_recheck_interval_minutes": 30,
   "max_requests_per_hour": 30,
+  "logged_in_polling": {
+    "max_requests_per_hour": 8,
+    "delay_between_pages_sec": [15, 45],
+    "delay_between_posts_sec": [10, 30],
+    "comment_recheck_interval_minutes": 90
+  },
   "output_dir": "downloads",
   "headless": true,
   "tor": {

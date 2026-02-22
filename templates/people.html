@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}People - FB Monitor{% endblock %}
+{% block content %}
+<h1>People</h1>
+
+<div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; align-items: flex-start;">
+    <form class="filters" method="get" action="/people" style="margin-bottom: 0;">
+        <input type="text" name="search" placeholder="Search people..." value="{{ search }}">
+        <button type="submit">Search</button>
+        {% if search %}<a href="/people" style="padding: 0.5rem; color: var(--text-dim); font-size: 0.85rem;">Clear</a>{% endif %}
+    </form>
+
+    <form method="post" action="/people/create" style="display: flex; gap: 0.5rem; align-items: center;">
+        <input type="text" name="name" placeholder="Name" required
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+        <input type="text" name="facebook_url" placeholder="Facebook URL (optional)"
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+        <button type="submit" style="background: var(--green); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">+ Add Person</button>
+    </form>
+</div>
+
+{% if people %}
+{% for person in people %}
+<a href="/people/{{ person.id }}" style="text-decoration: none; color: inherit;">
+    <div class="card post-card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <span style="font-weight: 600; font-size: 1.05rem;">{{ person.name }}</span>
+                {% if person.facebook_url %}
+                <span style="color: var(--text-dim); font-size: 0.85rem; margin-left: 0.5rem;">{{ person.facebook_url }}</span>
+                {% endif %}
+            </div>
+            <div style="display: flex; gap: 0.75rem;">
+                {% if person.page_count %}
+                <span class="badge" style="background: #2a3a50; color: #6db3f2;">{{ person.page_count }} page{{ "s" if person.page_count != 1 }}</span>
+                {% endif %}
+                {% if person.post_count %}
+                <span class="badge" style="background: #3a3a2a; color: #e8c84a;">{{ person.post_count }} post{{ "s" if person.post_count != 1 }}</span>
+                {% endif %}
+                {% if person.comment_count %}
+                <span class="badge badge-comment">{{ person.comment_count }} comment{{ "s" if person.comment_count != 1 }}</span>
+                {% endif %}
+            </div>
+        </div>
+        {% if person.notes %}
+        <div style="color: var(--text-dim); font-size: 0.85rem; margin-top: 0.5rem;">{{ person.notes }}</div>
+        {% endif %}
+    </div>
+</a>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+    <p>No people added yet. Use the form above to track people across pages and posts.</p>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}{{ person.name }} - FB Monitor{% endblock %}
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/people" style="color: var(--text-dim); font-size: 0.85rem;">&larr; Back to people</a>
+</div>
+
+<div class="card">
+    <form method="post" action="/people/{{ person.id }}/update" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
+            <input type="text" name="name" value="{{ person.name }}" required
+                   style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 1.1rem; font-weight: 600; flex: 1;">
+            <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Save</button>
+        </div>
+        <input type="text" name="facebook_url" value="{{ person.facebook_url or '' }}" placeholder="Facebook URL"
+               style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+        <textarea name="notes" placeholder="Notes about this person..." rows="2"
+                  style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem; resize: vertical;">{{ person.notes or '' }}</textarea>
+    </form>
+    <div style="margin-top: 0.75rem; text-align: right;">
+        <form method="post" action="/people/{{ person.id }}/delete" style="display: inline;"
+              onsubmit="return confirm('Delete {{ person.name }}? This removes all links.')">
+            <button type="submit" style="background: none; color: var(--red); border: 1px solid var(--red); padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">Delete Person</button>
+        </form>
+    </div>
+</div>
+
+<!-- Linked Pages -->
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Linked Pages ({{ pages|length }})</h2>
+<div class="card">
+    {% for page in pages %}
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+        <div>
+            <a href="/posts?page_name={{ page.page_name | urlencode }}">{{ page.page_name }}</a>
+            <span style="color: var(--text-dim); font-size: 0.8rem; margin-left: 0.5rem;">[{{ page.role }}]</span>
+        </div>
+        <form method="post" action="/people/{{ person.id }}/unlink-page" style="display: inline;">
+            <input type="hidden" name="page_name" value="{{ page.page_name }}">
+            <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
+        </form>
+    </div>
+    {% endfor %}
+
+    <form method="post" action="/people/{{ person.id }}/link-page" style="display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
+        <select name="page_name" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="">Select page...</option>
+            {% for name in all_page_names %}
+            <option value="{{ name }}">{{ name }}</option>
+            {% endfor %}
+        </select>
+        <select name="role" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+            <option value="owner">Owner</option>
+            <option value="admin">Admin</option>
+            <option value="contributor">Contributor</option>
+            <option value="associated">Associated</option>
+        </select>
+        <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Link</button>
+    </form>
+</div>
+
+<!-- Linked Posts -->
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Linked Posts ({{ posts|length }})</h2>
+{% if posts %}
+{% for post in posts %}
+<a href="/posts/{{ post.post_id | urlencode }}" style="text-decoration: none; color: inherit;">
+    <div class="card post-card">
+        <div class="meta">
+            <span class="page-name">{{ post.page_name }}</span>
+            <span style="color: var(--orange);">[{{ post.role }}]</span>
+            <span>{{ post.detected_at[:16] }}</span>
+        </div>
+        <div class="text-preview">{{ post.text[:200] }}{% if post.text and post.text|length > 200 %}...{% endif %}</div>
+    </div>
+</a>
+{% endfor %}
+{% else %}
+<div class="card" style="color: var(--text-dim); text-align: center; padding: 1.5rem;">
+    No posts linked. You can link this person to posts from the post detail page.
+</div>
+{% endif %}
+
+<!-- Linked Comments -->
+{% if comments %}
+<h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Linked Comments ({{ comments|length }})</h2>
+<div class="card">
+    {% for c in comments %}
+    <div class="comment">
+        <span class="ts">{{ c.detected_at[:16] }}</span>
+        <div class="body">{{ c.text[:300] }}{% if c.text|length > 300 %}...{% endif %}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

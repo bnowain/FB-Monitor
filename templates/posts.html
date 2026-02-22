@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Posts - FB Monitor{% endblock %}
+{% block content %}
+<h1>Posts</h1>
+
+<form class="filters" method="get" action="/posts">
+    <input type="text" name="search" placeholder="Search posts..." value="{{ search }}">
+    <select name="page_name">
+        <option value="">All pages</option>
+        {% for name in page_names %}
+        <option value="{{ name }}" {% if name == page_name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+    </select>
+    <button type="submit">Filter</button>
+    {% if search or page_name %}
+    <a href="/posts" style="padding: 0.5rem; color: var(--text-dim); font-size: 0.85rem;">Clear</a>
+    {% endif %}
+</form>
+
+{% if posts %}
+{% for post in posts %}
+<a href="/posts/{{ post.post_id | urlencode }}" style="text-decoration: none; color: inherit;">
+    <div class="card post-card">
+        <div class="meta">
+            <span class="page-name">{{ post.page_name }}</span>
+            <span>{{ post.detected_at[:16] }}</span>
+            {% if post.author %}<span>by {{ post.author }}</span>{% endif %}
+            {% if post.account %}<span style="color: var(--text-dim);">[{{ post.account }}]</span>{% endif %}
+        </div>
+        {% if post.shared_from %}
+        <div class="shared-from">Shared from {{ post.shared_from }}</div>
+        {% endif %}
+        <div class="text-preview">{{ post.text[:300] }}{% if post.text|length > 300 %}...{% endif %}</div>
+        <div class="attachment-badges">
+            {% if post.attachment_counts.images %}
+            <span class="badge badge-image">{{ post.attachment_counts.images }} image{{ "s" if post.attachment_counts.images != 1 }}</span>
+            {% endif %}
+            {% if post.attachment_counts.videos %}
+            <span class="badge badge-video">{{ post.attachment_counts.videos }} video{{ "s" if post.attachment_counts.videos != 1 }}</span>
+            {% endif %}
+            {% if post.comment_count %}
+            <span class="badge badge-comment">{{ post.comment_count }} comment{{ "s" if post.comment_count != 1 }}</span>
+            {% endif %}
+        </div>
+    </div>
+</a>
+{% endfor %}
+
+{% if posts|length >= 50 %}
+<div style="text-align: center; padding: 1rem;">
+    <a href="/posts?offset={{ offset + 50 }}{% if search %}&search={{ search }}{% endif %}{% if page_name %}&page_name={{ page_name }}{% endif %}">Load more</a>
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <p>No posts found{% if search %} matching "{{ search }}"{% endif %}{% if page_name %} for {{ page_name }}{% endif %}.</p>
+</div>
+{% endif %}
+{% endblock %}

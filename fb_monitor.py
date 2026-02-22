@@ -42,6 +42,7 @@ from extractors import extract_posts, get_health_report
 from post_parser import parse_post
 from comments import extract_comments, merge_comments, load_comments_file, save_comments_file
 from downloader import download_attachments
+from database import init_db, save_post as db_save_post, save_comments as db_save_comments, save_attachments as db_save_attachments
 from tracker import (
     load_state, save_state, is_post_seen, mark_post_seen,
     add_tracking_job, get_due_tracking_jobs, update_tracking_job,
@@ -205,7 +206,7 @@ def open_post_page(browser_context, url: str, rate_limiter: RateLimiter = None) 
 # Phase 1: Detect new posts
 # ---------------------------------------------------------------------------
 
-def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browser_context, rate_limiter: RateLimiter) -> list[dict]:
+def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browser_context, rate_limiter: RateLimiter, is_logged_in: bool = False) -> list[dict]:
     """
     Scan a list of pages for new posts.
     For each new post: parse data, download attachments, capture initial comments.
@@ -306,7 +307,14 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
                 json.dump(post_json, f, indent=2, ensure_ascii=False)
             log.info(f"  Saved: {post_json_path}")
 
+            # --- Write to database ---
+            account = get_account_for_page(page_cfg, config)
+            post_json["page_url"] = page_url
+            db_save_post(post_json, account=account)
+            db_save_attachments(post.id, attachment_result)
+
             # --- Initial comment capture ---
+            initial_comments = []
             if post_page:
                 try:
                     initial_comments = extract_comments(
@@ -317,14 +325,15 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
                     comments_path = post_dir / "comments.json"
                     save_comments_file(comments_path, initial_comments, post.url)
                     log.info(f"  Initial comments: {len(initial_comments)}")
+
+                    # Write comments to DB
+                    db_save_comments(post.id, [c.to_dict() for c in initial_comments])
                 except Exception as e:
                     log.warning(f"  Initial comment extraction failed: {e}")
-                    initial_comments = []
 
                 post_page.close()
 
             # --- Register for comment tracking ---
-            account = get_account_for_page(page_cfg, config)
             add_tracking_job(state, post.id, post.url, str(post_dir), page_name, account)
 
             # --- Mark seen ---
@@ -336,9 +345,15 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
 
             results.append(post_json)
 
-            # Random delay between posts to look human
+            # Random delay between posts — much longer for logged-in accounts
             if post != new_posts[-1]:
-                delay = human_delay(3.0, 8.0)
+                if is_logged_in:
+                    lo, hi = config.get("logged_in_polling", {}).get(
+                        "delay_between_posts_sec", [10, 30]
+                    )
+                    delay = random.uniform(lo, hi)
+                else:
+                    delay = human_delay(3.0, 8.0)
                 log.debug(f"  Waiting {delay:.1f}s before next post...")
                 time.sleep(delay)
 
@@ -349,7 +364,7 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
 # Phase 2: Recheck comments on tracked posts
 # ---------------------------------------------------------------------------
 
-def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_context, rate_limiter: RateLimiter) -> int:
+def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_context, rate_limiter: RateLimiter, is_logged_in: bool = False) -> int:
     """
     Recheck comments on the given tracking jobs.
     Returns total new comments found.
@@ -393,11 +408,18 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
 
         # Save updated comments
         save_comments_file(comments_path, merged, post_url)
+        db_save_comments(job["post_id"], [c.to_dict() for c in new_comments])
         update_tracking_job(state, job["post_id"])
 
-        # Random delay between rechecks
+        # Random delay between rechecks — longer for logged-in accounts
         if job != due_jobs[-1]:
-            delay = human_delay(2.0, 6.0)
+            if is_logged_in:
+                lo, hi = config.get("logged_in_polling", {}).get(
+                    "delay_between_posts_sec", [10, 30]
+                )
+                delay = random.uniform(lo, hi)
+            else:
+                delay = human_delay(2.0, 6.0)
             time.sleep(delay)
 
     return total_new
@@ -407,47 +429,74 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
 # Main run cycle
 # ---------------------------------------------------------------------------
 
-def run_cycle(config: dict, rate_limiter: RateLimiter):
+def _is_logged_in(account: str) -> bool:
+    """True if this is a named (logged-in) account, not anonymous."""
+    return account not in ("anonymous", "")
+
+
+def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: RateLimiter):
     """
     Run one full cycle: detect new posts + recheck comments.
 
     Pages are grouped by account, and each account gets its own
     browser session (persistent profile for logged-in accounts,
     fresh stealth context for anonymous).
+
+    Logged-in accounts use conservative timing to look like a
+    real person casually browsing. Anonymous sessions use Tor and
+    can poll more aggressively.
     """
     state = load_state()
 
     # Prune expired tracking jobs
     tracking_hours = config.get("comment_tracking_hours", 24)
-    recheck_interval = config.get("comment_recheck_interval_minutes", 30)
+    anon_recheck = config.get("comment_recheck_interval_minutes", 30)
+    login_recheck = config.get("logged_in_polling", {}).get(
+        "comment_recheck_interval_minutes", 90
+    )
     prune_expired_jobs(state, tracking_hours)
 
     # Group pages by account
     account_groups = group_pages_by_account(config)
 
-    # Group due comment-recheck jobs by account
-    due_jobs = get_due_tracking_jobs(state, recheck_interval, tracking_hours)
+    # Group due comment-recheck jobs by account, using the right interval
+    anon_due = get_due_tracking_jobs(state, anon_recheck, tracking_hours)
+    login_due = get_due_tracking_jobs(state, login_recheck, tracking_hours)
+
     recheck_by_account: dict[str, list[dict]] = {}
-    for job in due_jobs:
+    for job in anon_due:
         acct = job.get("account", "anonymous")
-        recheck_by_account.setdefault(acct, []).append(job)
+        if not _is_logged_in(acct):
+            recheck_by_account.setdefault(acct, []).append(job)
+    for job in login_due:
+        acct = job.get("account", "anonymous")
+        if _is_logged_in(acct):
+            recheck_by_account.setdefault(acct, []).append(job)
 
     # Merge account lists (some accounts may only have rechecks, not new pages)
     all_accounts = set(account_groups.keys()) | set(recheck_by_account.keys())
 
+    # Process anonymous accounts first (Tor), then logged-in (conservative)
+    sorted_accounts = sorted(all_accounts, key=lambda a: (1 if _is_logged_in(a) else 0, a))
+
     all_new_posts = []
     total_new_comments = 0
+    logged_in_cfg = config.get("logged_in_polling", {})
 
     with sync_playwright() as pw:
-        for account in all_accounts:
+        for account in sorted_accounts:
             pages_for_account = account_groups.get(account, [])
             rechecks_for_account = recheck_by_account.get(account, [])
 
             if not pages_for_account and not rechecks_for_account:
                 continue
 
+            is_login = _is_logged_in(account)
+            rate_limiter = login_rate_limiter if is_login else anon_rate_limiter
+            mode_label = "conservative" if is_login else "anonymous/tor"
+
             log.info(f"{'=' * 40}")
-            log.info(f"Account: {account} "
+            log.info(f"Account: {account} [{mode_label}] "
                      f"({len(pages_for_account)} page(s), "
                      f"{len(rechecks_for_account)} recheck(s))")
 
@@ -461,22 +510,34 @@ def run_cycle(config: dict, rate_limiter: RateLimiter):
             try:
                 # Phase 1: Detect new posts
                 if pages_for_account:
+                    # Conservative pre-delay for logged-in accounts
+                    if is_login:
+                        lo, hi = logged_in_cfg.get("delay_between_pages_sec", [15, 45])
+                        pre = random.uniform(lo, hi)
+                        log.info(f"  Waiting {pre:.0f}s (conservative pacing)...")
+                        time.sleep(pre)
+
                     try:
                         new_posts = detect_new_posts(
-                            pages_for_account, config, state, context, rate_limiter
+                            pages_for_account, config, state, context,
+                            rate_limiter, is_logged_in=is_login,
                         )
                         all_new_posts.extend(new_posts)
                     except Exception as e:
                         log.error(f"Error detecting posts for '{account}': {e}")
 
-                # Random pause between phases
-                time.sleep(human_delay(2.0, 5.0))
+                # Pause between phases — longer for logged-in
+                if is_login:
+                    time.sleep(human_delay(10.0, 30.0))
+                else:
+                    time.sleep(human_delay(2.0, 5.0))
 
                 # Phase 2: Recheck comments
                 if rechecks_for_account:
                     try:
                         new_comments = recheck_comments(
-                            rechecks_for_account, config, state, context, rate_limiter
+                            rechecks_for_account, config, state, context,
+                            rate_limiter, is_logged_in=is_login,
                         )
                         total_new_comments += new_comments
                     except Exception as e:
@@ -491,9 +552,12 @@ def run_cycle(config: dict, rate_limiter: RateLimiter):
                 except Exception:
                     pass
 
-            # Delay between accounts
-            if account != list(all_accounts)[-1]:
-                delay = human_delay(3.0, 8.0)
+            # Delay between accounts — longer for logged-in
+            if account != sorted_accounts[-1]:
+                if is_login:
+                    delay = human_delay(15.0, 45.0)
+                else:
+                    delay = human_delay(3.0, 8.0)
                 log.debug(f"Waiting {delay:.1f}s before next account...")
                 time.sleep(delay)
 
@@ -528,6 +592,7 @@ def main():
         sys.exit(1)
 
     config = load_config()
+    init_db()
 
     # --- Tor override from CLI ---
     if args.tor:
@@ -611,19 +676,26 @@ def main():
             log.error("Aborting: Tor is enabled but connection could not be verified.")
             sys.exit(1)
 
+    # Build rate limiters — separate limits for anonymous vs logged-in
+    anon_max = config.get("max_requests_per_hour", 30)
+    login_max = config.get("logged_in_polling", {}).get("max_requests_per_hour", 8)
+    anon_rate_limiter = RateLimiter(max_per_hour=anon_max)
+    login_rate_limiter = RateLimiter(max_per_hour=login_max)
+
     if args.watch:
         interval = config.get("check_interval_minutes", 15)
-        max_per_hour = config.get("max_requests_per_hour", 30)
-        rate_limiter = RateLimiter(max_per_hour=max_per_hour)
 
         log.info(f"Watch mode — base interval: {interval}min (±40% jitter)")
-        log.info(f"Comment tracking: {config.get('comment_tracking_hours', 24)}h window, "
-                 f"recheck every {config.get('comment_recheck_interval_minutes', 30)}min")
-        log.info(f"Rate limit: {max_per_hour} page loads/hr")
+        log.info(f"Comment tracking: {config.get('comment_tracking_hours', 24)}h window")
+        log.info(f"Rate limits: anonymous={anon_max}/hr, logged-in={login_max}/hr")
+        if config.get("tor", {}).get("enabled"):
+            log.info("Tor: enabled for anonymous sessions only")
 
         while True:
             try:
-                new_posts, new_comments = run_cycle(config, rate_limiter)
+                new_posts, new_comments = run_cycle(
+                    config, anon_rate_limiter, login_rate_limiter
+                )
 
                 # Jittered sleep — never the same interval twice
                 sleep_secs = jittered_interval(interval)
@@ -632,15 +704,17 @@ def main():
                     f"Cycle complete: {len(new_posts)} new post(s), "
                     f"{new_comments} new comment(s). "
                     f"Next check in {sleep_mins:.1f}min "
-                    f"({rate_limiter.count_last_hour()} requests this hour)"
+                    f"(anon: {anon_rate_limiter.count_last_hour()}/{anon_max}/hr, "
+                    f"login: {login_rate_limiter.count_last_hour()}/{login_max}/hr)"
                 )
                 time.sleep(sleep_secs)
             except KeyboardInterrupt:
                 log.info("Stopped.")
                 break
     else:
-        rate_limiter = RateLimiter(max_per_hour=config.get("max_requests_per_hour", 30))
-        new_posts, new_comments = run_cycle(config, rate_limiter)
+        new_posts, new_comments = run_cycle(
+            config, anon_rate_limiter, login_rate_limiter
+        )
         print(f"\n{'=' * 50}")
         print(f"Results: {len(new_posts)} new post(s), {new_comments} new comment(s)")
 

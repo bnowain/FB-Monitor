@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}{{ post.page_name }} - Post{% endblock %}
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/posts" style="color: var(--text-dim); font-size: 0.85rem;">&larr; Back to posts</a>
+</div>
+
+<div class="post-full">
+    <div class="card">
+        <div class="meta" style="display: flex; gap: 1rem; font-size: 0.85rem; color: var(--text-dim); margin-bottom: 0.75rem; flex-wrap: wrap;">
+            <span style="color: var(--accent); font-weight: 600;">{{ post.page_name }}</span>
+            {% if post.author %}<span>{{ post.author }}</span>{% endif %}
+            {% if post.timestamp %}<span>{{ post.timestamp }}</span>{% endif %}
+            <span>Captured: {{ post.detected_at[:19] }}</span>
+        </div>
+
+        {% if post.shared_from %}
+        <div style="color: var(--orange); font-size: 0.9rem; margin-bottom: 0.5rem;">
+            Shared from {{ post.shared_from }}
+            {% if post.shared_original_url %}
+            — <a href="{{ post.shared_original_url }}" target="_blank" rel="noopener">original</a>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="text-body">{{ post.text or "(no text captured)" }}</div>
+
+        {% if post.post_url %}
+        <div class="field-label">Source</div>
+        <a href="{{ post.post_url }}" target="_blank" rel="noopener">{{ post.post_url }}</a>
+        {% endif %}
+
+        {% if links %}
+        <div class="field-label">Links in Post</div>
+        <div class="links-list">
+            {% for link in links %}
+            <a href="{{ link }}" target="_blank" rel="noopener">{{ link }}</a>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if post.reaction_count %}
+        <div class="field-label">Reactions</div>
+        <span>{{ post.reaction_count }}</span>
+        {% endif %}
+    </div>
+
+    <!-- Linked People -->
+    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">
+        People ({{ linked_people|length }})
+    </h2>
+    <div class="card">
+        {% for p in linked_people %}
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--border);">
+            <div>
+                <a href="/people/{{ p.id }}">{{ p.name }}</a>
+                <span style="color: var(--orange); font-size: 0.8rem; margin-left: 0.5rem;">[{{ p.role }}]</span>
+            </div>
+            <form method="post" action="/posts/{{ post.post_id }}/unlink-person" style="display: inline;">
+                <input type="hidden" name="person_id" value="{{ p.id }}">
+                <input type="hidden" name="role" value="{{ p.role }}">
+                <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
+            </form>
+        </div>
+        {% endfor %}
+
+        <form method="post" action="/posts/{{ post.post_id }}/link-person" style="display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
+            <select name="person_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+                <option value="">Select person...</option>
+                {% for p in all_people %}
+                <option value="{{ p.id }}">{{ p.name }}</option>
+                {% endfor %}
+            </select>
+            <select name="role" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
+                <option value="author">Author</option>
+                <option value="tagged">Tagged</option>
+                <option value="mentioned">Mentioned</option>
+                <option value="replied_to">Replied to</option>
+                <option value="associated">Associated</option>
+            </select>
+            <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Link</button>
+        </form>
+    </div>
+
+    {% if attachments %}
+    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Attachments</h2>
+    <div class="attachments-grid">
+        {% for att in attachments %}
+        {% if att.type == 'image' %}
+        <a href="/attachment/{{ att.id }}" target="_blank">
+            <img src="/attachment/{{ att.id }}" alt="{{ att.filename }}" loading="lazy">
+        </a>
+        {% elif att.type == 'video' %}
+        <div class="card" style="text-align: center; padding: 2rem;">
+            <div style="font-size: 2rem;">&#127909;</div>
+            <div style="margin-top: 0.5rem;">
+                <a href="/attachment/{{ att.id }}">{{ att.filename }}</a>
+            </div>
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">
+        Comments ({{ comments|length }})
+    </h2>
+
+    {% if comments %}
+    <div class="card">
+        {% for c in comments %}
+        <div class="comment" {% if c.is_reply %}style="margin-left: 1.5rem;"{% endif %}>
+            <span class="author">{{ c.author or "Unknown" }}</span>
+            {% if c.is_reply %}<span class="reply-marker">reply</span>{% endif %}
+            {% if c.timestamp %}<span class="ts"> &middot; {{ c.timestamp }}</span>{% endif %}
+            <div class="body">{{ c.text }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="card" style="color: var(--text-dim); padding: 2rem; text-align: center;">
+        No comments captured yet.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
