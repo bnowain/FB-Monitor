@@ -10,8 +10,6 @@
 // @grant        GM_getValue
 // @connect      localhost
 // @connect      127.0.0.1
-// @connect      fbcdn.net
-// @connect      *.fbcdn.net
 // ==/UserScript==
 
 (function () {
@@ -271,20 +269,18 @@
       if (abbr) timestamp = abbr.getAttribute('title') || abbr.getAttribute('datetime') || abbr.textContent;
     }
 
-    // --- Images (grab full-res CDN URLs) ---
+    // --- Images (collect DOM elements for direct pixel capture) ---
     const imageUrls = [];
+    const imageElements = [];  // Store actual DOM refs for canvas capture
     const seenImageKeys = new Set();
 
     // First try: links wrapping images (often link to full-res photo page)
     article.querySelectorAll('a[href*="/photo"] img[src*="fbcdn"], a[href*="/photo"] img[src*="scontent"]').forEach(img => {
-      let src = img.src;
-      // Prefer data-src if available (may be higher res)
-      if (img.dataset.src && (img.dataset.src.includes('fbcdn') || img.dataset.src.includes('scontent'))) {
-        src = img.dataset.src;
-      }
+      const src = img.src;
       if (src && !seenImageKeys.has(src)) {
         seenImageKeys.add(src);
         imageUrls.push(src);
+        imageElements.push(img);
       }
     });
 
@@ -296,6 +292,7 @@
       if (img.naturalWidth > 150 || img.width > 150 || src.includes('/p') || src.includes('_n.')) {
         seenImageKeys.add(src);
         imageUrls.push(src);
+        imageElements.push(img);
       }
     });
 
@@ -366,6 +363,7 @@
       timestamp,
       shared_from: sharedFrom || null,
       image_urls: imageUrls,
+      _image_elements: imageElements,  // DOM refs for canvas capture (not serialized)
       video_urls: videoUrls,
       reaction_count: reactionCount,
       comment_count_text: commentCountText,
@@ -419,64 +417,92 @@
     return comments;
   }
 
-  // --- Capture image data from browser ---
-  function fetchImageAsBase64(url) {
+  // --- Capture image data directly from the DOM (no extra network calls) ---
+
+  function captureImageFromCanvas(imgEl) {
+    // Read pixels straight from the already-rendered <img> via canvas
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = imgEl.naturalWidth || imgEl.width;
+      canvas.height = imgEl.naturalHeight || imgEl.height;
+      if (canvas.width < 10 || canvas.height < 10) return null;
+
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(imgEl, 0, 0);
+      // toDataURL will throw if canvas is tainted (cross-origin without CORS)
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      const base64 = dataUrl.split(',')[1];
+      return { url: imgEl.src, data: base64, content_type: 'image/jpeg' };
+    } catch (e) {
+      // Canvas tainted — cross-origin image without CORS headers
+      return null;
+    }
+  }
+
+  function captureImageViaCORS(imgEl) {
+    // Re-request the same URL with crossOrigin, should hit browser HTTP cache
     return new Promise((resolve) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: url,
-        responseType: 'arraybuffer',
-        onload: function (response) {
-          try {
-            const bytes = new Uint8Array(response.response);
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) {
-              binary += String.fromCharCode(bytes[i]);
-            }
-            const base64 = btoa(binary);
-            const contentType = response.responseHeaders?.match(/content-type:\s*(\S+)/i)?.[1] || 'image/jpeg';
-            resolve({ url, data: base64, content_type: contentType });
-          } catch (e) {
-            console.warn('[FB Monitor] Failed to capture image:', url, e);
-            resolve(null);
-          }
-        },
-        onerror: function () {
-          console.warn('[FB Monitor] Failed to fetch image:', url);
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+          const base64 = dataUrl.split(',')[1];
+          resolve({ url: imgEl.src, data: base64, content_type: 'image/jpeg' });
+        } catch (e) {
           resolve(null);
         }
-      });
+      };
+      img.onerror = () => resolve(null);
+      // Set src last — if CDN sends CORS headers, browser may serve from cache
+      img.src = imgEl.src;
+      // Timeout: if it doesn't load in 5s, give up
+      setTimeout(() => resolve(null), 5000);
     });
   }
 
   async function captureImagesForPosts(posts) {
     const status = document.getElementById('fbm-status');
     let totalImages = 0;
-    for (const post of posts) totalImages += post.image_urls.length;
+    for (const post of posts) totalImages += (post._image_elements || []).length;
 
     if (totalImages === 0) return posts;
 
-    status.textContent = `Capturing ${totalImages} images from browser...`;
+    status.textContent = `Capturing ${totalImages} images from page...`;
     let captured = 0;
 
     for (const post of posts) {
-      if (post.image_urls.length === 0) continue;
+      const elements = post._image_elements || [];
+      if (elements.length === 0) continue;
 
       post.image_data = [];
-      // Fetch images in parallel (per post)
-      const promises = post.image_urls.map(url => fetchImageAsBase64(url));
-      const results = await Promise.all(promises);
 
-      for (const result of results) {
+      for (const imgEl of elements) {
+        // Try 1: Direct canvas read (instant, zero network, works if same-origin or CORS)
+        let result = captureImageFromCanvas(imgEl);
+
+        // Try 2: Re-request with crossOrigin flag (hits HTTP cache if CDN has CORS headers)
+        if (!result) {
+          result = await captureImageViaCORS(imgEl);
+        }
+
         if (result) {
           post.image_data.push(result);
           captured++;
           status.textContent = `Capturing images: ${captured}/${totalImages}`;
         }
       }
+
+      // Clean up DOM refs before serializing to JSON
+      delete post._image_elements;
     }
 
-    status.textContent = `Captured ${captured}/${totalImages} images`;
+    status.textContent = `Captured ${captured}/${totalImages} images from cache`;
     return posts;
   }
 
@@ -544,10 +570,11 @@
     status.textContent = `Found ${posts.length} posts, ${totalComments} comments, ${totalImages} images, ${totalVideos} videos`;
     status.style.color = '#e1e4ed';
 
-    // Capture image data from the browser (images are already loaded)
-    if (totalImages > 0) {
-      await captureImagesForPosts(posts);
-    }
+    // Capture image data directly from the rendered page (no extra network calls)
+    await captureImagesForPosts(posts);
+
+    // Clean up any remaining DOM refs before serialization
+    for (const p of posts) delete p._image_elements;
 
     // Also log to console for debugging
     console.log(`[FB Monitor] Extracted ${posts.length} posts:`, posts);
