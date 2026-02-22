@@ -868,6 +868,9 @@ def main():
     parser.add_argument("--login", type=str, metavar="ACCOUNT", help="Log in to an account (opens browser)")
     parser.add_argument("--accounts", action="store_true", help="List saved account sessions")
     parser.add_argument("--logout", type=str, metavar="ACCOUNT", help="Delete a saved account session")
+    parser.add_argument("--deep-scrape", type=str, metavar="PAGE_NAME", help="Deep scrape a page's full history with logged-in session")
+    parser.add_argument("--max-posts", type=int, default=0, help="Max posts to process in deep scrape (0=unlimited)")
+    parser.add_argument("--account", type=str, default="", help="Account to use for deep scrape")
     parser.add_argument("--tor", action="store_true", help="Route all traffic through Tor (SOCKS5 on 127.0.0.1:9050)")
     parser.add_argument("--config", type=str, default=str(CONFIG_PATH), help="Path to config file")
     args = parser.parse_args()
@@ -956,6 +959,47 @@ def main():
                 f.unlink()
                 print(f"Removed: {f}")
         print("State cleared.")
+        return
+
+    # --- Deep scrape mode ---
+    if args.deep_scrape:
+        from deep_scrape import deep_scrape_page
+
+        target_name = args.deep_scrape
+
+        # Find the page in config
+        page_cfg = None
+        for p in config.get("pages", []):
+            if p["name"].lower() == target_name.lower():
+                page_cfg = p
+                break
+
+        if not page_cfg:
+            # Allow using a URL directly
+            if "facebook.com/" in target_name:
+                page_cfg = {"name": target_name.split("/")[-1], "url": target_name}
+            else:
+                log.error(f"Page '{target_name}' not found in config. Available pages:")
+                for p in config.get("pages", []):
+                    print(f"  - {p['name']}")
+                sys.exit(1)
+
+        # Determine which account to use
+        account = args.account
+        if not account:
+            account = page_cfg.get("account", "") or config.get("default_account", "anonymous")
+
+        if account == "anonymous":
+            log.warning("Deep scrape works best with a logged-in account.")
+            log.warning("Use --account <name> or set default_account in config.json")
+
+        deep_scrape_page(
+            page_name=page_cfg["name"],
+            page_url=page_cfg["url"],
+            account=account,
+            config=config,
+            max_posts=args.max_posts,
+        )
         return
 
     # --- Verify Tor connection if enabled ---
