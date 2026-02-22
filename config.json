@@ -27,7 +27,9 @@
   "headless": true,
   "tor": {
     "enabled": false,
-    "socks_port": 9050
+    "socks_port": 9050,
+    "control_port": 9051,
+    "control_password": ""
   },
   "notifications": {
     "enabled": false,

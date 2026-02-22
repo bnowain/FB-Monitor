@@ -55,7 +55,7 @@ from tracker import (
 from stealth import (
     jittered_interval, human_delay, human_scroll,
     create_stealth_context, stealth_goto, RateLimiter,
-    get_tor_proxy,
+    get_tor_proxy, renew_tor_circuit,
 )
 from sessions import (
     interactive_login, create_session_context, get_account_for_page,
@@ -191,10 +191,10 @@ def _dismiss_dialogs(page):
             pass
 
 
-def open_post_page(browser_context, url: str, rate_limiter: RateLimiter = None) -> "Page":
+def open_post_page(browser_context, url: str, rate_limiter: RateLimiter = None, rotation_callback=None) -> "Page":
     """Open a post URL in a new page with stealth timing."""
     if rate_limiter:
-        rate_limiter.wait_if_needed()
+        rate_limiter.wait_if_needed(rotation_callback=rotation_callback)
 
     page = browser_context.new_page()
     stealth_goto(page, url)
@@ -217,6 +217,12 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
     """
     results = []
 
+    # For anonymous+Tor sessions, provide a rotation callback so the rate
+    # limiter can renew the circuit instead of blocking for a long time.
+    tor_rotate = None
+    if not is_logged_in and config.get("tor", {}).get("enabled"):
+        tor_rotate = lambda: renew_tor_circuit(config)
+
     for page_cfg in page_configs:
         page_name = page_cfg["name"]
         page_url = page_cfg["url"]
@@ -226,7 +232,7 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
         log.info(f"Checking page: {page_name}")
 
         # Rate limit check before loading feed
-        rate_limiter.wait_if_needed()
+        rate_limiter.wait_if_needed(rotation_callback=tor_rotate)
 
         # Load the page feed
         feed_page = browser_context.new_page()
@@ -271,7 +277,7 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
 
             # --- Parse post data ---
             try:
-                post_page = open_post_page(browser_context, post.url, rate_limiter)
+                post_page = open_post_page(browser_context, post.url, rate_limiter, rotation_callback=tor_rotate)
                 post_data = parse_post(
                     post_page,
                     browser_context=browser_context,
@@ -447,6 +453,10 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
     log.info(f"Rechecking comments on {len(due_jobs)} post(s)...")
     total_new = 0
 
+    tor_rotate = None
+    if not is_logged_in and config.get("tor", {}).get("enabled"):
+        tor_rotate = lambda: renew_tor_circuit(config)
+
     for job in due_jobs:
         post_url = job["post_url"]
         post_dir = Path(job["post_dir"])
@@ -456,7 +466,7 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
                  f"(check #{job.get('comment_checks', 0) + 1})")
 
         try:
-            post_page = open_post_page(browser_context, post_url, rate_limiter)
+            post_page = open_post_page(browser_context, post_url, rate_limiter, rotation_callback=tor_rotate)
             new_comments = extract_comments(
                 post_page,
                 browser_context=browser_context,
@@ -514,6 +524,10 @@ def process_import_queue(config: dict, browser_context, rate_limiter: RateLimite
     log.info(f"Processing {len(pending)} imported URL(s)...")
     scraped = 0
 
+    tor_rotate = None
+    if config.get("tor", {}).get("enabled"):
+        tor_rotate = lambda: renew_tor_circuit(config)
+
     for item in pending:
         url = item["url"]
         import_id = item["id"]
@@ -539,7 +553,7 @@ def process_import_queue(config: dict, browser_context, rate_limiter: RateLimite
         log.info(f"  Importing: {url}")
 
         try:
-            post_page = open_post_page(browser_context, url, rate_limiter)
+            post_page = open_post_page(browser_context, url, rate_limiter, rotation_callback=tor_rotate)
             post_data = parse_post(
                 post_page,
                 browser_context=browser_context,
@@ -632,6 +646,43 @@ def _is_logged_in(account: str) -> bool:
     return account not in ("anonymous", "")
 
 
+def _rotate_tor_session(pw, config: dict, old_context, old_browser, rate_limiter: RateLimiter):
+    """
+    Rotate the Tor circuit and create a fresh anonymous browser session.
+
+    1. Sends SIGNAL NEWNYM to Tor (new exit node / IP)
+    2. Closes the old browser context
+    3. Creates a new one with a fresh fingerprint (user agent, viewport)
+    4. Resets the rate limiter counter
+
+    Returns (new_context, new_browser, success).
+    If rotation fails, returns the old context/browser unchanged.
+    """
+    if not renew_tor_circuit(config):
+        log.warning("  Tor rotation failed — continuing with current circuit")
+        return old_context, old_browser, False
+
+    # Close old session
+    try:
+        old_context.close()
+        if old_browser:
+            old_browser.close()
+    except Exception:
+        pass
+
+    # Create fresh session with new fingerprint
+    try:
+        context, browser, _ = create_session_context(pw, "anonymous", config)
+    except Exception as e:
+        log.error(f"  Failed to create new session after Tor rotation: {e}")
+        # Try to recreate with old settings as fallback
+        context, browser, _ = create_session_context(pw, "anonymous", config)
+
+    rate_limiter.reset()
+    log.info(f"  New anonymous session ready (rate limiter reset: 0/{rate_limiter.max_per_hour})")
+    return context, browser, True
+
+
 def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: RateLimiter):
     """
     Run one full cycle: detect new posts + recheck comments.
@@ -671,6 +722,9 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
         if _is_logged_in(acct):
             recheck_by_account.setdefault(acct, []).append(job)
 
+    # Check if there are pending imports (processed by anonymous session)
+    has_pending_imports = bool(get_pending_imports(limit=1))
+
     # Merge account lists (some accounts may only have rechecks, not new pages)
     all_accounts = set(account_groups.keys()) | set(recheck_by_account.keys())
 
@@ -680,9 +734,6 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
 
     # Process anonymous accounts first (Tor), then logged-in (conservative)
     sorted_accounts = sorted(all_accounts, key=lambda a: (1 if _is_logged_in(a) else 0, a))
-
-    # Check if there are pending imports (processed by anonymous session)
-    has_pending_imports = bool(get_pending_imports(limit=1))
 
     all_new_posts = []
     total_new_comments = 0
@@ -715,6 +766,9 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
                 log.error(f"Failed to create session for '{account}': {e}")
                 continue
 
+            # Tor rotation is only available for anonymous sessions
+            can_rotate = not is_login and config.get("tor", {}).get("enabled", False)
+
             try:
                 # Phase 1: Detect new posts
                 if pages_for_account:
@@ -734,8 +788,15 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
                     except Exception as e:
                         log.error(f"Error detecting posts for '{account}': {e}")
 
-                # Pause between phases — longer for logged-in
-                if is_login:
+                # Between phases: rotate Tor if rate limited
+                wait_needed = rate_limiter.should_wait()
+                if can_rotate and wait_needed and wait_needed > 60:
+                    log.info(f"  Rate limit approaching — rotating Tor circuit instead of waiting {wait_needed:.0f}s")
+                    context, browser, rotated = _rotate_tor_session(
+                        pw, config, context, browser, rate_limiter
+                    )
+                    is_temp = True  # new browser needs cleanup
+                elif is_login:
                     time.sleep(human_delay(10.0, 30.0))
                 else:
                     time.sleep(human_delay(2.0, 5.0))
@@ -751,9 +812,19 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
                     except Exception as e:
                         log.error(f"Error rechecking comments for '{account}': {e}")
 
+                # Between phases: rotate Tor if rate limited again
+                wait_needed = rate_limiter.should_wait()
+                if can_rotate and wait_needed and wait_needed > 60:
+                    log.info(f"  Rate limit approaching — rotating Tor circuit instead of waiting {wait_needed:.0f}s")
+                    context, browser, rotated = _rotate_tor_session(
+                        pw, config, context, browser, rate_limiter
+                    )
+                    is_temp = True
+                else:
+                    time.sleep(human_delay(2.0, 5.0))
+
                 # Phase 3: Process import queue (anonymous only)
                 if should_process_imports:
-                    time.sleep(human_delay(2.0, 5.0))
                     try:
                         imported = process_import_queue(config, context, rate_limiter)
                         total_imports += imported

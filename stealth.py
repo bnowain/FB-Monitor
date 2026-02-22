@@ -160,6 +160,10 @@ class RateLimiter:
         self._prune()
         return len(self.requests)
 
+    def reset(self):
+        """Clear all recorded requests (used after Tor circuit renewal)."""
+        self.requests.clear()
+
     def should_wait(self) -> Optional[float]:
         """
         If we're near the rate limit, return seconds to wait.
@@ -180,10 +184,22 @@ class RateLimiter:
 
         return None
 
-    def wait_if_needed(self):
-        """Block if we're near the rate limit."""
+    def wait_if_needed(self, rotation_callback=None):
+        """
+        Block if we're near the rate limit.
+
+        If a rotation_callback is provided and the wait would be long (>60s),
+        calls the callback instead of waiting. The callback should rotate the
+        Tor circuit and return True on success, after which the counter is reset.
+        """
         wait = self.should_wait()
         if wait and wait > 0:
+            # If we'd wait a long time and can rotate, do that instead
+            if rotation_callback and wait > 60:
+                log.info(f"  Rate limit hit ({self.count_last_hour()}/{self.max_per_hour}/hr) — requesting Tor rotation...")
+                if rotation_callback():
+                    self.reset()
+                    return
             log.info(f"  ⏳ Rate limit: waiting {wait:.0f}s ({self.count_last_hour()}/{self.max_per_hour} requests/hr)")
             time.sleep(wait)
 
@@ -199,6 +215,61 @@ def get_tor_proxy(config: dict) -> dict | None:
         return None
     port = tor_cfg.get("socks_port", 9050)
     return {"server": f"socks5://127.0.0.1:{port}"}
+
+
+def renew_tor_circuit(config: dict) -> bool:
+    """
+    Request a new Tor circuit via the control port (SIGNAL NEWNYM).
+
+    This gives us a new exit node / IP address. Requires Tor's ControlPort
+    to be enabled (typically port 9051). Returns True on success.
+
+    To enable in torrc:
+        ControlPort 9051
+        CookieAuthentication 1
+    Or with a password:
+        HashedControlPassword <hash>
+    """
+    import socket
+
+    tor_cfg = config.get("tor", {})
+    if not tor_cfg.get("enabled"):
+        return False
+
+    control_port = tor_cfg.get("control_port", 9051)
+    password = tor_cfg.get("control_password", "")
+
+    try:
+        sock = socket.create_connection(("127.0.0.1", control_port), timeout=10)
+
+        # Authenticate
+        if password:
+            sock.sendall(f'AUTHENTICATE "{password}"\r\n'.encode())
+        else:
+            sock.sendall(b"AUTHENTICATE\r\n")
+        response = sock.recv(256).decode()
+        if "250" not in response:
+            log.warning(f"Tor control auth failed: {response.strip()}")
+            sock.close()
+            return False
+
+        # Request new circuit
+        sock.sendall(b"SIGNAL NEWNYM\r\n")
+        response = sock.recv(256).decode()
+        sock.close()
+
+        if "250" in response:
+            log.info("Tor circuit renewed — new exit node")
+            # Tor needs a moment to build the new circuit
+            time.sleep(random.uniform(3, 6))
+            return True
+        else:
+            log.warning(f"Tor NEWNYM failed: {response.strip()}")
+            return False
+
+    except Exception as e:
+        log.warning(f"Tor circuit renewal failed: {e}")
+        return False
 
 
 def create_stealth_context(browser, config: dict):
