@@ -21,6 +21,56 @@
     </a>
 </div>
 
+{% if status == 'pending' and pending_videos > 0 %}
+<div class="card" style="margin-bottom: 1.5rem; border: 1px solid var(--accent);">
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;">
+        <div>
+            <div style="font-weight: 600; margin-bottom: 0.25rem;">Batch Video Download</div>
+            <div style="font-size: 0.85rem; color: var(--text-dim);">
+                {{ pending_videos }} pending video{{ 's' if pending_videos != 1 else '' }}.
+                Downloads one at a time with random delays to avoid detection.
+            </div>
+            {% if batch_state.running %}
+            <div style="font-size: 0.85rem; color: var(--green); margin-top: 0.25rem;">
+                Running: {{ batch_state.downloaded }}/{{ batch_state.total }} downloaded
+                {% if batch_state.current %} — {{ batch_state.current }}{% endif %}
+            </div>
+            {% endif %}
+        </div>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+            {% if batch_state.running %}
+            <form method="post" action="/downloads/batch-stop">
+                <button type="submit" style="background: #e05555; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                    Stop
+                </button>
+            </form>
+            {% else %}
+            <form method="post" action="/downloads/batch-videos" style="display: flex; gap: 0.5rem; align-items: center;">
+                <label style="font-size: 0.8rem; color: var(--text-dim);">Delay:</label>
+                <select name="min_delay" style="padding: 0.3rem; border-radius: 4px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.8rem;">
+                    <option value="60">1 min</option>
+                    <option value="300" selected>5 min</option>
+                    <option value="900">15 min</option>
+                    <option value="3600">1 hr</option>
+                </select>
+                <span style="font-size: 0.8rem; color: var(--text-dim);">to</span>
+                <select name="max_delay" style="padding: 0.3rem; border-radius: 4px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.8rem;">
+                    <option value="300">5 min</option>
+                    <option value="1800" selected>30 min</option>
+                    <option value="3600">1 hr</option>
+                    <option value="7200">2 hr</option>
+                    <option value="14400">4 hr</option>
+                </select>
+                <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">
+                    Download All Videos
+                </button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {% if items %}
 {% for item in items %}
 <div class="card" style="display: flex; gap: 1rem; align-items: center;">

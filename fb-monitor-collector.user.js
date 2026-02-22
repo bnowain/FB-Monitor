@@ -269,21 +269,50 @@
       if (abbr) timestamp = abbr.getAttribute('title') || abbr.getAttribute('datetime') || abbr.textContent;
     }
 
-    // --- Images ---
+    // --- Images (grab full-res CDN URLs) ---
     const imageUrls = [];
-    article.querySelectorAll('img[src*="fbcdn"], img[src*="scontent"]').forEach(img => {
-      const src = img.src;
-      if (src && (img.naturalWidth > 200 || src.includes('/p') || src.includes('_n.'))) {
-        if (!imageUrls.includes(src)) imageUrls.push(src);
+    const seenImageKeys = new Set();
+
+    // First try: links wrapping images (often link to full-res photo page)
+    article.querySelectorAll('a[href*="/photo"] img[src*="fbcdn"], a[href*="/photo"] img[src*="scontent"]').forEach(img => {
+      let src = img.src;
+      // Prefer data-src if available (may be higher res)
+      if (img.dataset.src && (img.dataset.src.includes('fbcdn') || img.dataset.src.includes('scontent'))) {
+        src = img.dataset.src;
+      }
+      if (src && !seenImageKeys.has(src)) {
+        seenImageKeys.add(src);
+        imageUrls.push(src);
       }
     });
 
-    // --- Videos ---
+    // Second pass: any fbcdn/scontent images not already captured
+    article.querySelectorAll('img[src*="fbcdn"], img[src*="scontent"]').forEach(img => {
+      const src = img.src;
+      if (!src || seenImageKeys.has(src)) return;
+      // Filter out tiny icons/avatars — only grab content images
+      if (img.naturalWidth > 150 || img.width > 150 || src.includes('/p') || src.includes('_n.')) {
+        seenImageKeys.add(src);
+        imageUrls.push(src);
+      }
+    });
+
+    // --- Videos (capture post URLs for yt-dlp, not blob: URLs) ---
     const videoUrls = [];
+    // Look for video links in the post (yt-dlp works best with post/video page URLs)
+    article.querySelectorAll('a[href*="/videos/"], a[href*="/watch"], a[href*="/reel/"]').forEach(a => {
+      const href = a.href.split('?')[0];
+      if (href && !videoUrls.includes(href)) videoUrls.push(href);
+    });
+    // Also capture direct video src if available (non-blob)
     article.querySelectorAll('video[src], video source[src]').forEach(v => {
       const src = v.src || v.getAttribute('src');
-      if (src && !videoUrls.includes(src)) videoUrls.push(src);
+      if (src && !src.startsWith('blob:') && !videoUrls.includes(src)) videoUrls.push(src);
     });
+    // If we see a video element but have no URLs, the post URL itself may work for yt-dlp
+    if (videoUrls.length === 0 && article.querySelector('video')) {
+      if (postUrl) videoUrls.push(postUrl);
+    }
 
     // --- Reactions / counts ---
     let reactionCount = '';
@@ -407,7 +436,10 @@
       onload: function (response) {
         try {
           const result = JSON.parse(response.responseText);
-          status.textContent = `Saved ${result.saved || 0} posts, ${result.comments || 0} comments`;
+          let msg = `Saved ${result.saved || 0} posts, ${result.comments || 0} comments`;
+          if (result.images_downloaded) msg += `, ${result.images_downloaded} images`;
+          if (result.videos_queued) msg += `, ${result.videos_queued} videos queued`;
+          status.textContent = msg;
           status.style.color = '#4caf7d';
         } catch (e) {
           status.textContent = `API responded: ${response.status}`;

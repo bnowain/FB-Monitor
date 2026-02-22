@@ -14,8 +14,11 @@ import argparse
 import hashlib
 import json
 import logging
+import random
 import re
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Body, Form, Query, Request
@@ -492,11 +495,20 @@ async def downloads_page(request: Request, status: str = "pending"):
     }
     conn.close()
 
+    # Count pending videos specifically for batch controls
+    conn_v = db.get_connection()
+    video_count = conn_v.execute(
+        "SELECT COUNT(*) FROM media_queue WHERE status='pending' AND type='video'"
+    ).fetchone()[0]
+    conn_v.close()
+
     return templates.TemplateResponse("downloads.html", {
         "request": request,
         "items": items,
         "status": status,
         "counts": counts,
+        "pending_videos": video_count,
+        "batch_state": _batch_state,
         "active_page": "downloads",
     })
 
@@ -571,6 +583,86 @@ async def trigger_download(media_id: int):
 async def skip_download(media_id: int):
     db.update_media_status(media_id, "skipped")
     return RedirectResponse("/downloads?status=pending", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Batch video download with random intervals
+# ---------------------------------------------------------------------------
+
+_batch_state = {"running": False, "downloaded": 0, "total": 0, "current": ""}
+
+
+def _batch_video_worker(min_delay: int, max_delay: int):
+    """Download all pending videos one at a time with random delays between them."""
+    try:
+        conn = db.get_connection()
+        items = conn.execute("""
+            SELECT mq.* FROM media_queue mq
+            WHERE mq.status = 'pending' AND mq.type = 'video'
+            ORDER BY mq.created_at ASC
+        """).fetchall()
+        conn.close()
+        items = [dict(r) for r in items]
+
+        _batch_state["total"] = len(items)
+        _batch_state["downloaded"] = 0
+
+        for i, item in enumerate(items):
+            if not _batch_state["running"]:
+                log.info("Batch video download stopped by user")
+                break
+
+            _batch_state["current"] = item["url"][:80]
+            log.info(f"Batch video [{i+1}/{len(items)}]: {item['url'][:80]}")
+
+            _do_download(item)
+            _batch_state["downloaded"] = i + 1
+
+            # Random delay before next download
+            if i < len(items) - 1 and _batch_state["running"]:
+                delay = random.uniform(min_delay, max_delay)
+                log.info(f"  Next download in {delay:.0f}s")
+                # Sleep in small chunks so we can check for stop signal
+                elapsed = 0
+                while elapsed < delay and _batch_state["running"]:
+                    time.sleep(min(5, delay - elapsed))
+                    elapsed += 5
+
+    except Exception as e:
+        log.error(f"Batch video download error: {e}")
+    finally:
+        _batch_state["running"] = False
+        _batch_state["current"] = ""
+
+
+@app.post("/downloads/batch-videos")
+async def batch_download_videos(
+    min_delay: int = Form(300),
+    max_delay: int = Form(1800),
+):
+    """Start downloading all pending videos with random delays between them."""
+    if _batch_state["running"]:
+        return RedirectResponse("/downloads?status=pending", status_code=303)
+
+    _batch_state["running"] = True
+    thread = threading.Thread(
+        target=_batch_video_worker, args=(min_delay, max_delay), daemon=True,
+    )
+    thread.start()
+    return RedirectResponse("/downloads?status=pending", status_code=303)
+
+
+@app.post("/downloads/batch-stop")
+async def batch_stop():
+    """Stop the batch video download."""
+    _batch_state["running"] = False
+    return RedirectResponse("/downloads?status=pending", status_code=303)
+
+
+@app.get("/api/downloads/batch-status")
+async def batch_status():
+    """Get the current batch download status."""
+    return _batch_state
 
 
 # ---------------------------------------------------------------------------
@@ -858,9 +950,19 @@ async def api_ingest(request: Request):
     if not posts:
         return JSONResponse({"error": "No posts provided"}, status_code=400)
 
+    # Load config for output dir
+    config_path = Path(__file__).parent / "config.json"
+    output_dir = Path("downloads")
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        output_dir = Path(config.get("output_dir", "downloads"))
+
     saved = 0
     skipped = 0
     total_comments = 0
+    total_images_downloaded = 0
+    total_videos_queued = 0
 
     for post in posts:
         post_id = post.get("post_id", "")
@@ -872,6 +974,12 @@ async def api_ingest(request: Request):
         if existing:
             skipped += 1
             continue
+
+        # Create post directory for storing downloaded images
+        page_key = re.sub(r'[^\w]', '_', page_name or "unknown")[:50]
+        safe_id = re.sub(r'[^\w]', '_', post_id)[:50]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        post_dir = output_dir / page_key / f"{ts}_{safe_id}"
 
         # Build post data dict matching what db.save_post expects
         post_data = {
@@ -889,7 +997,7 @@ async def api_ingest(request: Request):
             "reaction_count": post.get("reaction_count", ""),
             "comment_count_text": post.get("comment_count_text", ""),
             "share_count_text": post.get("share_count_text", ""),
-            "post_dir": "",
+            "post_dir": str(post_dir),
         }
 
         db.save_post(post_data, account="extension")
@@ -901,23 +1009,39 @@ async def api_ingest(request: Request):
             new_comments = db.save_comments(post_id, comments)
             total_comments += new_comments
 
-        # Queue media for download if present
         image_urls = post.get("image_urls", [])
         video_urls = post.get("video_urls", [])
-        if image_urls or video_urls:
+        post_url_str = post.get("post_url", "")
+
+        # Auto-download images immediately (CDN URLs expire)
+        if image_urls:
+            attachments_dir = post_dir / "attachments"
+            try:
+                downloaded = download_images(image_urls, attachments_dir)
+                if downloaded:
+                    db.save_attachments(post_id, {"images": downloaded, "videos": []})
+                    total_images_downloaded += len(downloaded)
+            except Exception as e:
+                log.warning(f"Ingest image download failed for {post_id}: {e}")
+
+        # Queue videos for gradual download (don't download now)
+        if video_urls or any(p in post_url_str for p in ("/videos/", "/watch/", "/reel/")):
             try:
                 db.queue_media_batch(
-                    post_id, image_urls, video_urls,
-                    post_url=post.get("post_url", ""),
+                    post_id, [], video_urls,
+                    post_url=post_url_str,
                     account="extension",
                 )
+                total_videos_queued += len(video_urls)
             except Exception:
-                pass  # May fail on duplicates, that's fine
+                pass
 
     return {
         "saved": saved,
         "skipped": skipped,
         "comments": total_comments,
+        "images_downloaded": total_images_downloaded,
+        "videos_queued": total_videos_queued,
         "total_submitted": len(posts),
     }
 
