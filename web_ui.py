@@ -17,18 +17,33 @@ import re
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Body, Form, Query, Request
+from fastapi import FastAPI, Body, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import database as db
 from downloader import download_images, download_video_ytdlp
+from screenshot_parser import encode_image_bytes, parse_screenshot, parse_multiple_screenshots
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 app = FastAPI(title="FB Monitor")
 log = logging.getLogger("fb-monitor-web")
+
+
+def _get_anthropic_key() -> str:
+    """Get Anthropic API key from config or environment."""
+    import os
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if key:
+        return key
+    config_path = BASE_DIR / "config.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        key = config.get("anthropic_api_key", "")
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +692,157 @@ async def import_delete(import_id: int):
 async def import_retry(import_id: int):
     db.update_import_status(import_id, "pending")
     return RedirectResponse("/import?status=pending", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Screenshot import (vision parsing)
+# ---------------------------------------------------------------------------
+
+@app.get("/screenshots", response_class=HTMLResponse)
+async def screenshots_page(request: Request, message: str = "", message_type: str = ""):
+    api_key = _get_anthropic_key()
+    return templates.TemplateResponse("screenshots.html", {
+        "request": request,
+        "api_key_set": bool(api_key),
+        "message": message,
+        "message_type": message_type,
+        "active_page": "screenshots",
+    })
+
+
+@app.post("/screenshots/parse", response_class=HTMLResponse)
+async def screenshots_parse(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    page_name: str = Form(""),
+    page_url: str = Form(""),
+):
+    api_key = _get_anthropic_key()
+    if not api_key:
+        return RedirectResponse(
+            "/screenshots?message=Anthropic+API+key+not+configured&message_type=error",
+            status_code=303,
+        )
+
+    # Read and encode all uploaded images
+    images = []
+    for f in files:
+        if not f.content_type or not f.content_type.startswith("image/"):
+            continue
+        data = await f.read()
+        if data:
+            b64, media_type = encode_image_bytes(data, f.filename or "screenshot.png")
+            images.append((b64, media_type))
+
+    if not images:
+        return RedirectResponse(
+            "/screenshots?message=No+valid+images+uploaded&message_type=error",
+            status_code=303,
+        )
+
+    # Parse with Claude vision
+    if len(images) == 1:
+        result = parse_screenshot(images[0][0], images[0][1], api_key, page_name=page_name)
+    else:
+        result = parse_multiple_screenshots(images, api_key, page_name=page_name)
+
+    posts = result.get("posts", [])
+    error = result.get("error", "")
+    raw_response = result.get("raw_response", "")
+
+    # Use page_name from API response if not provided
+    if not page_name and result.get("page_name"):
+        page_name = result["page_name"]
+
+    return templates.TemplateResponse("screenshot_review.html", {
+        "request": request,
+        "posts": posts,
+        "page_name": page_name,
+        "page_url": page_url,
+        "image_count": len(images),
+        "error": error,
+        "raw_response": raw_response,
+        "active_page": "screenshots",
+    })
+
+
+@app.post("/screenshots/save")
+async def screenshots_save(request: Request):
+    form = await request.form()
+    page_name = form.get("page_name", "")
+    page_url = form.get("page_url", "")
+    post_count = int(form.get("post_count", 0))
+
+    saved = 0
+    total_comments = 0
+
+    for i in range(post_count):
+        # Check if this post is checked for saving
+        if not form.get(f"post_{i}_save"):
+            continue
+
+        author = form.get(f"post_{i}_author", "")
+        text = form.get(f"post_{i}_text", "")
+        timestamp = form.get(f"post_{i}_timestamp", "")
+        reactions = form.get(f"post_{i}_reactions", "")
+        comment_count_text = form.get(f"post_{i}_comment_count", "")
+        shares = form.get(f"post_{i}_shares", "")
+        shared_from = form.get(f"post_{i}_shared_from", "")
+
+        # Generate a post_id from content since we don't have a real Facebook post ID
+        import hashlib
+        content_hash = hashlib.sha256(
+            f"{page_name}:{author}:{text[:200]}:{timestamp}".encode()
+        ).hexdigest()[:12]
+        post_id = f"screenshot_{content_hash}"
+
+        post_data = {
+            "post_id": post_id,
+            "page_name": page_name or author or "Unknown",
+            "page_url": page_url,
+            "url": page_url or f"screenshot://{post_id}",
+            "author": author,
+            "text": text,
+            "timestamp": timestamp,
+            "timestamp_raw": timestamp,
+            "shared_from": shared_from or None,
+            "shared_original_url": None,
+            "links": [],
+            "reaction_count": reactions,
+            "comment_count_text": comment_count_text,
+            "share_count_text": shares,
+            "post_dir": "",
+        }
+
+        db.save_post(post_data, account="screenshot")
+        saved += 1
+
+        # Save comments
+        comment_total = int(form.get(f"post_{i}_comment_total", 0))
+        comments = []
+        for j in range(comment_total):
+            c_author = form.get(f"post_{i}_comment_{j}_author", "")
+            c_text = form.get(f"post_{i}_comment_{j}_text", "")
+            c_timestamp = form.get(f"post_{i}_comment_{j}_timestamp", "")
+            c_reply = bool(form.get(f"post_{i}_comment_{j}_reply"))
+
+            if c_author or c_text:
+                comments.append({
+                    "author": c_author,
+                    "text": c_text,
+                    "timestamp": c_timestamp,
+                    "is_reply": c_reply,
+                })
+
+        if comments:
+            new_comments = db.save_comments(post_id, comments)
+            total_comments += new_comments
+
+    msg = f"Saved+{saved}+post(s)"
+    if total_comments:
+        msg += f"+with+{total_comments}+comment(s)"
+
+    return RedirectResponse(f"/screenshots?message={msg}&message_type=success", status_code=303)
 
 
 # ---------------------------------------------------------------------------
