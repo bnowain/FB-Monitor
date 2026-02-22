@@ -31,6 +31,11 @@
   },
   "output_dir": "downloads",
   "skip_media_downloads": false,
+  "auto_download_logged_in": false,
+  "download_proxy": {
+    "url": "",
+    "token": ""
+  },
   "headless": true,
   "tor": {
     "enabled": false,

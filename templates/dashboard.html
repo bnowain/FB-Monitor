@@ -28,6 +28,12 @@
         <div class="number">{{ stats.total_entities }}</div>
         <div class="label"><a href="/entities" style="color: inherit;">Entities</a></div>
     </div>
+    {% if stats.pending_downloads %}
+    <div class="stat-card" style="border-color: var(--orange);">
+        <div class="number" style="color: var(--orange);">{{ stats.pending_downloads }}</div>
+        <div class="label"><a href="/downloads" style="color: inherit;">Pending Downloads</a></div>
+    </div>
+    {% endif %}
 </div>
 
 {% if stats.posts_per_page %}

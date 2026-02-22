@@ -153,6 +153,20 @@ def init_db(db_path: Optional[Path] = None):
             UNIQUE(entity_id, person_id)
         );
 
+        -- Media download queue: logged-in account media flagged for manual review
+        CREATE TABLE IF NOT EXISTS media_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id TEXT NOT NULL REFERENCES posts(post_id),
+            url TEXT NOT NULL,
+            type TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            local_path TEXT,
+            account TEXT,
+            created_at TEXT NOT NULL,
+            downloaded_at TEXT,
+            UNIQUE(post_id, url)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_posts_page ON posts(page_name);
         CREATE INDEX IF NOT EXISTS idx_posts_detected ON posts(detected_at);
         CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
@@ -879,6 +893,10 @@ def get_stats(db_path: Optional[Path] = None) -> dict:
     stats["total_entities"] = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
     stats["total_categories"] = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
 
+    stats["pending_downloads"] = conn.execute(
+        "SELECT COUNT(*) FROM media_queue WHERE status='pending'"
+    ).fetchone()[0]
+
     # Recent activity
     stats["recent_posts"] = [dict(r) for r in conn.execute(
         "SELECT * FROM posts ORDER BY detected_at DESC LIMIT 10"
@@ -891,3 +909,104 @@ def get_stats(db_path: Optional[Path] = None) -> dict:
 
     conn.close()
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Media queue operations (pending downloads from logged-in accounts)
+# ---------------------------------------------------------------------------
+
+def queue_media(post_id: str, url: str, media_type: str, account: str = "", db_path: Optional[Path] = None):
+    """Add a media URL to the pending download queue."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO media_queue (post_id, url, type, status, account, created_at)
+            VALUES (?, ?, ?, 'pending', ?, ?)
+        """, (post_id, url, media_type, account, now))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"DB: failed to queue media for {post_id}: {e}")
+    finally:
+        conn.close()
+
+
+def queue_media_batch(post_id: str, image_urls: list[str], video_urls: list[str],
+                      post_url: str = "", account: str = "", db_path: Optional[Path] = None):
+    """Queue multiple media URLs at once. For videos, stores the post_url for yt-dlp."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        for url in image_urls:
+            conn.execute("""
+                INSERT OR IGNORE INTO media_queue (post_id, url, type, status, account, created_at)
+                VALUES (?, ?, 'image', 'pending', ?, ?)
+            """, (post_id, url, account, now))
+        for url in video_urls:
+            conn.execute("""
+                INSERT OR IGNORE INTO media_queue (post_id, url, type, status, account, created_at)
+                VALUES (?, ?, 'video', 'pending', ?, ?)
+            """, (post_id, url, account, now))
+        # Also queue the post URL itself for yt-dlp video extraction
+        if video_urls or any(p in post_url for p in ("/videos/", "/watch/", "/reel/")):
+            conn.execute("""
+                INSERT OR IGNORE INTO media_queue (post_id, url, type, status, account, created_at)
+                VALUES (?, ?, 'video', 'pending', ?, ?)
+            """, (post_id, post_url, account, now))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"DB: failed to queue media batch for {post_id}: {e}")
+    finally:
+        conn.close()
+
+
+def get_pending_media(status: str = "pending", limit: int = 100, db_path: Optional[Path] = None) -> list[dict]:
+    """Get queued media items, optionally filtered by status."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT mq.*, p.page_name, p.text as post_text, p.post_url as post_page_url
+        FROM media_queue mq
+        JOIN posts p ON mq.post_id = p.post_id
+        WHERE mq.status = ?
+        ORDER BY mq.created_at DESC
+        LIMIT ?
+    """, (status, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_media_queue_for_post(post_id: str, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all queued media for a specific post."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM media_queue WHERE post_id = ? ORDER BY type, id",
+        (post_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_media_status(media_id: int, status: str, local_path: str = "", db_path: Optional[Path] = None):
+    """Update a queued media item's status (pending -> downloaded/skipped)."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    if status == "downloaded":
+        conn.execute(
+            "UPDATE media_queue SET status=?, local_path=?, downloaded_at=? WHERE id=?",
+            (status, local_path, now, media_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE media_queue SET status=? WHERE id=?",
+            (status, media_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_media_item(media_id: int, db_path: Optional[Path] = None) -> Optional[dict]:
+    """Get a single media queue item."""
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM media_queue WHERE id=?", (media_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None

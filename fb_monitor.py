@@ -42,7 +42,10 @@ from extractors import extract_posts, get_health_report
 from post_parser import parse_post
 from comments import extract_comments, merge_comments, load_comments_file, save_comments_file
 from downloader import download_attachments
-from database import init_db, save_post as db_save_post, save_comments as db_save_comments, save_attachments as db_save_attachments
+from database import (
+    init_db, save_post as db_save_post, save_comments as db_save_comments,
+    save_attachments as db_save_attachments, queue_media_batch,
+)
 from tracker import (
     load_state, save_state, is_post_seen, mark_post_seen,
     add_tracking_job, get_due_tracking_jobs, update_tracking_job,
@@ -297,15 +300,72 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
                     dl_proxy_url = tor_proxy["server"]
 
             skip_downloads = config.get("skip_media_downloads", False)
+            auto_dl_logged_in = config.get("auto_download_logged_in", False)
 
-            attachment_result = download_attachments(
-                post_url=post.url,
-                image_urls=post_data.image_urls,
-                video_urls=post_data.video_urls,
-                output_dir=post_dir,
-                proxy_url=dl_proxy_url,
-                skip_downloads=skip_downloads,
-            )
+            # Remote download proxy (VPS) — used when configured
+            dl_proxy_config = config.get("download_proxy")
+
+            # For logged-in accounts: queue media for manual review unless forced
+            is_gallery = len(post_data.image_urls) > 1
+
+            if is_logged_in and not skip_downloads:
+                account = get_account_for_page(page_cfg, config)
+
+                # Galleries (multi-photo) ALWAYS queued on logged-in — only anon/Tor downloads those
+                if is_gallery:
+                    log.info(f"  Gallery post ({len(post_data.image_urls)} images) — "
+                             f"queuing for manual download (logged-in account)")
+                    queue_media_batch(
+                        post.id,
+                        post_data.image_urls,
+                        post_data.video_urls,
+                        post_url=post.url,
+                        account=account,
+                    )
+                    attachment_result = {
+                        "images": [], "videos": [],
+                        "image_urls": post_data.image_urls,
+                        "video_urls": post_data.video_urls,
+                        "skipped": False, "queued": True,
+                    }
+                elif not auto_dl_logged_in:
+                    # Single image or videos — queue unless auto-download forced
+                    log.info(f"  Queuing {len(post_data.image_urls)} images, "
+                             f"{len(post_data.video_urls)} videos for manual download")
+                    queue_media_batch(
+                        post.id,
+                        post_data.image_urls,
+                        post_data.video_urls,
+                        post_url=post.url,
+                        account=account,
+                    )
+                    attachment_result = {
+                        "images": [], "videos": [],
+                        "image_urls": post_data.image_urls,
+                        "video_urls": post_data.video_urls,
+                        "skipped": False, "queued": True,
+                    }
+                else:
+                    # auto_download_logged_in=true AND not gallery — download directly
+                    attachment_result = download_attachments(
+                        post_url=post.url,
+                        image_urls=post_data.image_urls,
+                        video_urls=post_data.video_urls,
+                        output_dir=post_dir,
+                        proxy_url=dl_proxy_url,
+                        download_proxy=dl_proxy_config,
+                        skip_downloads=skip_downloads,
+                    )
+            else:
+                attachment_result = download_attachments(
+                    post_url=post.url,
+                    image_urls=post_data.image_urls,
+                    video_urls=post_data.video_urls,
+                    output_dir=post_dir,
+                    proxy_url=dl_proxy_url,
+                    download_proxy=dl_proxy_config,
+                    skip_downloads=skip_downloads,
+                )
 
             # --- Save post.json ---
             post_json = post_data.to_dict()

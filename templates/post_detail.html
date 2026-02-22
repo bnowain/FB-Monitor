@@ -125,6 +125,41 @@
     </div>
     {% endif %}
 
+    {% if queued_media %}
+    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Queued Media ({{ queued_media|length }})</h2>
+    <div class="card">
+        {% for item in queued_media %}
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+            <div>
+                {% if item.type == 'image' %}&#128247;{% else %}&#127909;{% endif %}
+                <span style="font-size: 0.85rem;">{{ item.type }}</span>
+                <span style="color: var(--text-dim); font-size: 0.75rem; margin-left: 0.5rem;">
+                    {% if item.status == 'pending' %}
+                    <span style="color: var(--orange);">pending</span>
+                    {% elif item.status == 'downloaded' %}
+                    <span style="color: var(--green);">downloaded</span>
+                    {% else %}
+                    <span>skipped</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+                {% if item.status == 'pending' %}
+                <form method="post" action="/downloads/{{ item.id }}/download" style="display: inline;">
+                    <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Download</button>
+                </form>
+                <form method="post" action="/downloads/{{ item.id }}/skip" style="display: inline;">
+                    <button type="submit" style="background: none; color: var(--text-dim); border: 1px solid var(--border); padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Skip</button>
+                </form>
+                {% elif item.status == 'downloaded' and item.local_path %}
+                <span style="color: var(--green); font-size: 0.8rem;">{{ item.local_path | basename if item.local_path else 'saved' }}</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">
         Comments ({{ comments|length }})
     </h2>

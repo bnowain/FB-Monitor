@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Downloads - FB Monitor{% endblock %}
+{% block content %}
+<h1>Media Downloads</h1>
+
+<div style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
+    <a href="/downloads?status=pending"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'pending' %}background: var(--accent); color: white;{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Pending ({{ counts.pending }})
+    </a>
+    <a href="/downloads?status=downloaded"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'downloaded' %}background: var(--green); color: white;{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Downloaded ({{ counts.downloaded }})
+    </a>
+    <a href="/downloads?status=skipped"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'skipped' %}background: var(--text-dim); color: var(--bg);{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Skipped ({{ counts.skipped }})
+    </a>
+</div>
+
+{% if items %}
+{% for item in items %}
+<div class="card" style="display: flex; gap: 1rem; align-items: center;">
+    <div style="flex-shrink: 0; width: 60px; text-align: center;">
+        {% if item.type == 'image' %}
+        <div style="font-size: 2rem;">&#128247;</div>
+        <div style="font-size: 0.7rem; color: var(--text-dim);">Image</div>
+        {% else %}
+        <div style="font-size: 2rem;">&#127909;</div>
+        <div style="font-size: 0.7rem; color: var(--text-dim);">Video</div>
+        {% endif %}
+    </div>
+
+    <div style="flex: 1; min-width: 0;">
+        <div style="font-size: 0.85rem;">
+            <a href="/posts/{{ item.post_id | urlencode }}">
+                <span style="color: var(--accent);">{{ item.page_name }}</span>
+            </a>
+            <span style="color: var(--text-dim); margin-left: 0.5rem;">[{{ item.account }}]</span>
+            <span style="color: var(--text-dim); margin-left: 0.5rem;">{{ item.created_at[:16] }}</span>
+        </div>
+        <div style="font-size: 0.85rem; color: var(--text-dim); margin-top: 0.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            {{ item.post_text[:120] if item.post_text else "(no text)" }}
+        </div>
+        <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 0.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            {{ item.url[:100] }}{% if item.url|length > 100 %}...{% endif %}
+        </div>
+        {% if item.status == 'downloaded' and item.local_path %}
+        <div style="font-size: 0.75rem; color: var(--green); margin-top: 0.25rem;">
+            Saved: {{ item.local_path }}
+        </div>
+        {% endif %}
+    </div>
+
+    <div style="flex-shrink: 0; display: flex; gap: 0.5rem;">
+        {% if item.status == 'pending' %}
+        <form method="post" action="/downloads/{{ item.id }}/download" style="display: inline;">
+            <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                Download
+            </button>
+        </form>
+        <form method="post" action="/downloads/{{ item.id }}/skip" style="display: inline;">
+            <button type="submit" style="background: none; color: var(--text-dim); border: 1px solid var(--border); padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                Skip
+            </button>
+        </form>
+        {% elif item.status == 'downloaded' %}
+        <span style="color: var(--green); font-size: 0.85rem;">Downloaded</span>
+        {% elif item.status == 'skipped' %}
+        <form method="post" action="/downloads/{{ item.id }}/download" style="display: inline;">
+            <button type="submit" style="background: var(--surface2); color: var(--text); border: 1px solid var(--border); padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                Download anyway
+            </button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+
+{% if items|length >= 100 %}
+<div style="text-align: center; padding: 1rem; color: var(--text-dim);">
+    Showing first 100 items.
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <p>No {{ status }} media items.</p>
+    {% if status == 'pending' %}
+    <p style="font-size: 0.9rem;">Media from logged-in accounts will appear here for manual download review.</p>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

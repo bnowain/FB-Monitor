@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import logging
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Query, Request
@@ -20,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import database as db
+from downloader import download_images, download_video_ytdlp
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -113,6 +115,7 @@ async def post_detail(request: Request, post_id: str):
     all_people = db.get_people()
     post_categories = db.get_categories_for_post(post_id)
     all_categories = db.get_categories()
+    queued_media = db.get_media_queue_for_post(post_id)
 
     return templates.TemplateResponse("post_detail.html", {
         "request": request,
@@ -124,6 +127,7 @@ async def post_detail(request: Request, post_id: str):
         "all_people": all_people,
         "post_categories": post_categories,
         "all_categories": all_categories,
+        "queued_media": queued_media,
         "active_page": "posts",
     })
 
@@ -465,6 +469,106 @@ async def person_unlink_entity(
 ):
     db.unlink_entity_from_person(entity_id, person_id)
     return RedirectResponse(f"/people/{person_id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Downloads queue (pending media from logged-in accounts)
+# ---------------------------------------------------------------------------
+
+@app.get("/downloads", response_class=HTMLResponse)
+async def downloads_page(request: Request, status: str = "pending"):
+    if status not in ("pending", "downloaded", "skipped"):
+        status = "pending"
+    items = db.get_pending_media(status=status)
+
+    # Get counts for the status tabs
+    conn = db.get_connection()
+    counts = {
+        "pending": conn.execute("SELECT COUNT(*) FROM media_queue WHERE status='pending'").fetchone()[0],
+        "downloaded": conn.execute("SELECT COUNT(*) FROM media_queue WHERE status='downloaded'").fetchone()[0],
+        "skipped": conn.execute("SELECT COUNT(*) FROM media_queue WHERE status='skipped'").fetchone()[0],
+    }
+    conn.close()
+
+    return templates.TemplateResponse("downloads.html", {
+        "request": request,
+        "items": items,
+        "status": status,
+        "counts": counts,
+        "active_page": "downloads",
+    })
+
+
+def _do_download(media_item: dict):
+    """Execute the actual download in a background thread."""
+    try:
+        post = db.get_post(media_item["post_id"])
+        if not post:
+            db.update_media_status(media_item["id"], "skipped")
+            return
+
+        post_dir = Path(post.get("post_dir", ""))
+        if not post_dir.exists():
+            post_dir.mkdir(parents=True, exist_ok=True)
+        attachments_dir = post_dir / "attachments"
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load config for proxy settings
+        config_path = Path(__file__).parent / "config.json"
+        dl_proxy_config = None
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+            dl_proxy_config = config.get("download_proxy")
+            if dl_proxy_config and not dl_proxy_config.get("url"):
+                dl_proxy_config = None
+
+        if media_item["type"] == "image":
+            saved = download_images(
+                [media_item["url"]], attachments_dir,
+                download_proxy=dl_proxy_config,
+            )
+            if saved:
+                db.update_media_status(media_item["id"], "downloaded", saved[0])
+                db.save_attachments(media_item["post_id"], {"images": saved, "videos": []})
+            else:
+                db.update_media_status(media_item["id"], "skipped")
+        else:
+            # Video — use the URL as the post URL for yt-dlp
+            saved = download_video_ytdlp(
+                media_item["url"], attachments_dir,
+                download_proxy=dl_proxy_config,
+            )
+            if saved:
+                db.update_media_status(media_item["id"], "downloaded", saved[0])
+                db.save_attachments(media_item["post_id"], {"images": [], "videos": saved})
+            else:
+                db.update_media_status(media_item["id"], "skipped")
+
+    except Exception as e:
+        log.error(f"Download failed for media {media_item['id']}: {e}")
+
+
+@app.post("/downloads/{media_id}/download")
+async def trigger_download(media_id: int):
+    item = db.get_media_item(media_id)
+    if not item:
+        return HTMLResponse("Not found", status_code=404)
+
+    # Run download in background thread so the UI doesn't block
+    thread = threading.Thread(target=_do_download, args=(item,), daemon=True)
+    thread.start()
+
+    # Mark as in-progress visually (it'll update to downloaded/skipped when done)
+    db.update_media_status(media_id, "downloaded")
+
+    return RedirectResponse("/downloads?status=pending", status_code=303)
+
+
+@app.post("/downloads/{media_id}/skip")
+async def skip_download(media_id: int):
+    db.update_media_status(media_id, "skipped")
+    return RedirectResponse("/downloads?status=pending", status_code=303)
 
 
 # ---------------------------------------------------------------------------
