@@ -153,6 +153,18 @@ def init_db(db_path: Optional[Path] = None):
             UNIQUE(entity_id, person_id)
         );
 
+        -- Import queue: manually submitted post URLs for anonymous scraping
+        CREATE TABLE IF NOT EXISTS import_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL UNIQUE,
+            page_name TEXT,
+            status TEXT DEFAULT 'pending',
+            post_id TEXT,
+            error TEXT,
+            submitted_at TEXT NOT NULL,
+            processed_at TEXT
+        );
+
         -- Media download queue: logged-in account media flagged for manual review
         CREATE TABLE IF NOT EXISTS media_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +192,7 @@ def init_db(db_path: Optional[Path] = None):
         CREATE INDEX IF NOT EXISTS idx_post_categories_cat ON post_categories(category_id);
         CREATE INDEX IF NOT EXISTS idx_entity_pages ON entity_pages(entity_id);
         CREATE INDEX IF NOT EXISTS idx_entity_people ON entity_people(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_import_queue_status ON import_queue(status);
     """)
     conn.commit()
 
@@ -897,6 +910,10 @@ def get_stats(db_path: Optional[Path] = None) -> dict:
         "SELECT COUNT(*) FROM media_queue WHERE status='pending'"
     ).fetchone()[0]
 
+    stats["pending_imports"] = conn.execute(
+        "SELECT COUNT(*) FROM import_queue WHERE status='pending'"
+    ).fetchone()[0]
+
     # Recent activity
     stats["recent_posts"] = [dict(r) for r in conn.execute(
         "SELECT * FROM posts ORDER BY detected_at DESC LIMIT 10"
@@ -1010,3 +1027,93 @@ def get_media_item(media_id: int, db_path: Optional[Path] = None) -> Optional[di
     row = conn.execute("SELECT * FROM media_queue WHERE id=?", (media_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Import queue operations (URL backfill)
+# ---------------------------------------------------------------------------
+
+def add_import_urls(urls: list[str], page_name: str = "", db_path: Optional[Path] = None) -> int:
+    """Add URLs to the import queue. Returns count of newly added URLs."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    added = 0
+    try:
+        for url in urls:
+            url = url.strip()
+            if not url:
+                continue
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO import_queue (url, page_name, status, submitted_at) VALUES (?, ?, 'pending', ?)",
+                    (url, page_name, now),
+                )
+                if conn.total_changes:
+                    added += 1
+            except Exception:
+                pass
+        conn.commit()
+    finally:
+        conn.close()
+    return added
+
+
+def get_import_queue(status: str = "", limit: int = 100, db_path: Optional[Path] = None) -> list[dict]:
+    """Get import queue items, optionally filtered by status."""
+    conn = get_connection(db_path)
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM import_queue WHERE status=? ORDER BY submitted_at DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM import_queue ORDER BY submitted_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_pending_imports(limit: int = 50, db_path: Optional[Path] = None) -> list[dict]:
+    """Get pending import URLs for processing."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM import_queue WHERE status='pending' ORDER BY submitted_at ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_import_status(import_id: int, status: str, post_id: str = "", error: str = "", db_path: Optional[Path] = None):
+    """Update an import queue item's status."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE import_queue SET status=?, post_id=?, error=?, processed_at=? WHERE id=?",
+        (status, post_id, error, now, import_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_import(import_id: int, db_path: Optional[Path] = None):
+    """Delete an import queue item."""
+    conn = get_connection(db_path)
+    conn.execute("DELETE FROM import_queue WHERE id=?", (import_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_import_counts(db_path: Optional[Path] = None) -> dict:
+    """Get counts by status for the import queue."""
+    conn = get_connection(db_path)
+    counts = {
+        "pending": conn.execute("SELECT COUNT(*) FROM import_queue WHERE status='pending'").fetchone()[0],
+        "scraped": conn.execute("SELECT COUNT(*) FROM import_queue WHERE status='scraped'").fetchone()[0],
+        "failed": conn.execute("SELECT COUNT(*) FROM import_queue WHERE status='failed'").fetchone()[0],
+        "duplicate": conn.execute("SELECT COUNT(*) FROM import_queue WHERE status='duplicate'").fetchone()[0],
+    }
+    conn.close()
+    return counts

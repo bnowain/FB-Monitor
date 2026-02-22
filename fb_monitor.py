@@ -45,6 +45,7 @@ from downloader import download_attachments
 from database import (
     init_db, save_post as db_save_post, save_comments as db_save_comments,
     save_attachments as db_save_attachments, queue_media_batch,
+    get_pending_imports, update_import_status, get_post as db_get_post,
 )
 from tracker import (
     load_state, save_state, is_post_seen, mark_post_seen,
@@ -497,6 +498,132 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: Process import queue (URL backfill)
+# ---------------------------------------------------------------------------
+
+def process_import_queue(config: dict, browser_context, rate_limiter: RateLimiter) -> int:
+    """
+    Process pending URLs from the import queue.
+    Each URL is opened, parsed, and saved as if it were a newly discovered post.
+    Uses the anonymous session. Returns count of successfully scraped posts.
+    """
+    pending = get_pending_imports(limit=20)
+    if not pending:
+        return 0
+
+    log.info(f"Processing {len(pending)} imported URL(s)...")
+    scraped = 0
+
+    for item in pending:
+        url = item["url"]
+        import_id = item["id"]
+        page_name = item.get("page_name") or "Imported"
+
+        # Derive a post_id from the URL
+        post_id = re.sub(r'[^\w]', '_', url.split("facebook.com/")[-1] if "facebook.com/" in url else url)[:80]
+
+        # Check if we already have this post
+        existing = db_get_post(post_id)
+        if existing:
+            log.info(f"  Already have post: {post_id[:40]}...")
+            update_import_status(import_id, "duplicate", post_id=post_id)
+            continue
+
+        page_key = slugify(page_name)
+        output_base = Path(config.get("output_dir", "downloads")) / page_key
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_id = re.sub(r'[^\w]', '_', post_id)[:50]
+        post_dir = output_base / f"{timestamp}_{safe_id}"
+        post_dir.mkdir(parents=True, exist_ok=True)
+
+        log.info(f"  Importing: {url}")
+
+        try:
+            post_page = open_post_page(browser_context, url, rate_limiter)
+            post_data = parse_post(
+                post_page,
+                browser_context=browser_context,
+                post_url=url,
+                post_id=post_id,
+                page_name=page_name,
+            )
+        except PlaywrightTimeout:
+            log.warning(f"  Timeout loading import URL: {url}")
+            update_import_status(import_id, "failed", error="Timeout loading page")
+            continue
+        except Exception as e:
+            log.warning(f"  Failed to parse import URL: {e}")
+            update_import_status(import_id, "failed", error=str(e)[:200])
+            continue
+
+        if not post_data:
+            update_import_status(import_id, "failed", error="Could not parse post data")
+            continue
+
+        # Download attachments (anonymous, so direct download)
+        dl_proxy_url = ""
+        tor_proxy = get_tor_proxy(config)
+        if tor_proxy:
+            dl_proxy_url = tor_proxy["server"]
+
+        skip_downloads = config.get("skip_media_downloads", False)
+        dl_proxy_config = config.get("download_proxy")
+
+        attachment_result = download_attachments(
+            post_url=url,
+            image_urls=post_data.image_urls,
+            video_urls=post_data.video_urls,
+            output_dir=post_dir,
+            proxy_url=dl_proxy_url,
+            download_proxy=dl_proxy_config,
+            skip_downloads=skip_downloads,
+        )
+
+        # Save post.json
+        post_json = post_data.to_dict()
+        post_json["detected_at"] = datetime.now(timezone.utc).isoformat()
+        post_json["attachments"] = attachment_result
+        post_json["post_dir"] = str(post_dir)
+        post_json["imported_from"] = url
+
+        post_json_path = post_dir / "post.json"
+        with open(post_json_path, "w", encoding="utf-8") as f:
+            json.dump(post_json, f, indent=2, ensure_ascii=False)
+
+        # Write to database
+        post_json["page_url"] = ""
+        db_save_post(post_json, account="anonymous")
+        db_save_attachments(post_id, attachment_result)
+
+        # Capture comments
+        if post_page:
+            try:
+                initial_comments = extract_comments(
+                    post_page,
+                    browser_context=browser_context,
+                    post_url=url,
+                )
+                comments_path = post_dir / "comments.json"
+                save_comments_file(comments_path, initial_comments, url)
+                db_save_comments(post_id, [c.to_dict() for c in initial_comments])
+                log.info(f"  Comments: {len(initial_comments)}")
+            except Exception as e:
+                log.warning(f"  Comment extraction failed: {e}")
+            post_page.close()
+
+        update_import_status(import_id, "scraped", post_id=post_id)
+        scraped += 1
+        log.info(f"  Imported successfully: {post_id[:40]}...")
+
+        # Random delay between imports
+        if item != pending[-1]:
+            delay = human_delay(3.0, 8.0)
+            time.sleep(delay)
+
+    return scraped
+
+
+# ---------------------------------------------------------------------------
 # Main run cycle
 # ---------------------------------------------------------------------------
 
@@ -547,11 +674,19 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
     # Merge account lists (some accounts may only have rechecks, not new pages)
     all_accounts = set(account_groups.keys()) | set(recheck_by_account.keys())
 
+    # Ensure anonymous is included if there are pending imports
+    if has_pending_imports:
+        all_accounts.add("anonymous")
+
     # Process anonymous accounts first (Tor), then logged-in (conservative)
     sorted_accounts = sorted(all_accounts, key=lambda a: (1 if _is_logged_in(a) else 0, a))
 
+    # Check if there are pending imports (processed by anonymous session)
+    has_pending_imports = bool(get_pending_imports(limit=1))
+
     all_new_posts = []
     total_new_comments = 0
+    total_imports = 0
     logged_in_cfg = config.get("logged_in_polling", {})
 
     with sync_playwright() as pw:
@@ -559,7 +694,9 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
             pages_for_account = account_groups.get(account, [])
             rechecks_for_account = recheck_by_account.get(account, [])
 
-            if not pages_for_account and not rechecks_for_account:
+            # For anonymous accounts, also check if there are imports to process
+            should_process_imports = not _is_logged_in(account) and has_pending_imports
+            if not pages_for_account and not rechecks_for_account and not should_process_imports:
                 continue
 
             is_login = _is_logged_in(account)
@@ -614,6 +751,15 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
                     except Exception as e:
                         log.error(f"Error rechecking comments for '{account}': {e}")
 
+                # Phase 3: Process import queue (anonymous only)
+                if should_process_imports:
+                    time.sleep(human_delay(2.0, 5.0))
+                    try:
+                        imported = process_import_queue(config, context, rate_limiter)
+                        total_imports += imported
+                    except Exception as e:
+                        log.error(f"Error processing imports: {e}")
+
             finally:
                 # Clean up this account's session
                 try:
@@ -634,7 +780,7 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
 
     save_state(state)
 
-    return all_new_posts, total_new_comments
+    return all_new_posts, total_new_comments, total_imports
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +910,7 @@ def main():
 
         while True:
             try:
-                new_posts, new_comments = run_cycle(
+                new_posts, new_comments, imports = run_cycle(
                     config, anon_rate_limiter, login_rate_limiter
                 )
 
@@ -773,7 +919,8 @@ def main():
                 sleep_mins = sleep_secs / 60
                 log.info(
                     f"Cycle complete: {len(new_posts)} new post(s), "
-                    f"{new_comments} new comment(s). "
+                    f"{new_comments} new comment(s), "
+                    f"{imports} imported. "
                     f"Next check in {sleep_mins:.1f}min "
                     f"(anon: {anon_rate_limiter.count_last_hour()}/{anon_max}/hr, "
                     f"login: {login_rate_limiter.count_last_hour()}/{login_max}/hr)"
@@ -783,11 +930,11 @@ def main():
                 log.info("Stopped.")
                 break
     else:
-        new_posts, new_comments = run_cycle(
+        new_posts, new_comments, imports = run_cycle(
             config, anon_rate_limiter, login_rate_limiter
         )
         print(f"\n{'=' * 50}")
-        print(f"Results: {len(new_posts)} new post(s), {new_comments} new comment(s)")
+        print(f"Results: {len(new_posts)} new post(s), {new_comments} new comment(s), {imports} imported")
 
         if new_posts:
             print(f"\nNew posts:")

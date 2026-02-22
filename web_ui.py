@@ -572,6 +572,60 @@ async def skip_download(media_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Import queue (URL backfill)
+# ---------------------------------------------------------------------------
+
+@app.get("/import", response_class=HTMLResponse)
+async def import_page(request: Request, status: str = "pending", message: str = "", message_type: str = ""):
+    if status not in ("pending", "scraped", "failed", "duplicate"):
+        status = "pending"
+    items = db.get_import_queue(status=status)
+    counts = db.get_import_counts()
+
+    return templates.TemplateResponse("import.html", {
+        "request": request,
+        "items": items,
+        "status": status,
+        "counts": counts,
+        "message": message,
+        "message_type": message_type,
+        "active_page": "import",
+    })
+
+
+@app.post("/import/add")
+async def import_add_urls(
+    urls: str = Form(""),
+    page_name: str = Form(""),
+):
+    url_list = [u.strip() for u in urls.strip().splitlines() if u.strip()]
+
+    if not url_list:
+        return RedirectResponse("/import?message=No+URLs+provided&message_type=error", status_code=303)
+
+    added = db.add_import_urls(url_list, page_name=page_name)
+    skipped = len(url_list) - added
+
+    msg = f"Added+{added}+URL(s)+to+import+queue"
+    if skipped:
+        msg += f"+({skipped}+already+queued)"
+
+    return RedirectResponse(f"/import?message={msg}&message_type=success", status_code=303)
+
+
+@app.post("/import/{import_id}/delete")
+async def import_delete(import_id: int):
+    db.delete_import(import_id)
+    return RedirectResponse("/import?status=pending", status_code=303)
+
+
+@app.post("/import/{import_id}/retry")
+async def import_retry(import_id: int):
+    db.update_import_status(import_id, "pending")
+    return RedirectResponse("/import?status=pending", status_code=303)
+
+
+# ---------------------------------------------------------------------------
 # Attachments (serve files)
 # ---------------------------------------------------------------------------
 

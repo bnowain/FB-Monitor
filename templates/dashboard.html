@@ -34,6 +34,12 @@
         <div class="label"><a href="/downloads" style="color: inherit;">Pending Downloads</a></div>
     </div>
     {% endif %}
+    {% if stats.pending_imports %}
+    <div class="stat-card" style="border-color: var(--accent);">
+        <div class="number" style="color: var(--accent);">{{ stats.pending_imports }}</div>
+        <div class="label"><a href="/import" style="color: inherit;">Pending Imports</a></div>
+    </div>
+    {% endif %}
 </div>
 
 {% if stats.posts_per_page %}

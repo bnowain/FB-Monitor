@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Import URLs - FB Monitor{% endblock %}
+{% block content %}
+<h1>Import Post URLs</h1>
+<p style="color: var(--text-dim); margin-bottom: 1.5rem;">
+    Paste Facebook post URLs below (one per line). The anonymous scraper will fetch each post on its next run.
+</p>
+
+<div class="card">
+    <form method="post" action="/import/add">
+        <div style="margin-bottom: 0.75rem;">
+            <label style="font-size: 0.85rem; color: var(--text-dim);">Post URLs (one per line)</label>
+            <textarea name="urls" rows="6"
+                placeholder="https://www.facebook.com/pagename/posts/123456&#10;https://www.facebook.com/pagename/posts/789012"
+                style="width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+                       padding: 0.75rem; border-radius: 6px; font-size: 0.9rem; font-family: monospace;
+                       resize: vertical;"></textarea>
+        </div>
+        <div style="display: flex; gap: 1rem; align-items: center;">
+            <div>
+                <label style="font-size: 0.85rem; color: var(--text-dim);">Page name (optional)</label>
+                <input type="text" name="page_name" placeholder="e.g. Vote Kevin Crye"
+                    style="background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+                           padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem;">
+            </div>
+            <button type="submit"
+                style="background: var(--accent); color: white; border: none; padding: 0.5rem 1.25rem;
+                       border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-top: 1.2rem;">
+                Add to Queue
+            </button>
+        </div>
+    </form>
+</div>
+
+{% if message %}
+<div style="padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem;
+            background: {% if message_type == 'error' %}#3a2020{% else %}#1a2e1a{% endif %};
+            border: 1px solid {% if message_type == 'error' %}var(--red){% else %}var(--green){% endif %};
+            color: {% if message_type == 'error' %}var(--red){% else %}var(--green){% endif %};">
+    {{ message }}
+</div>
+{% endif %}
+
+<div style="display: flex; gap: 1rem; margin-bottom: 1.5rem;">
+    <a href="/import?status=pending"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'pending' %}background: var(--accent); color: white;{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Pending ({{ counts.pending }})
+    </a>
+    <a href="/import?status=scraped"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'scraped' %}background: var(--green); color: white;{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Scraped ({{ counts.scraped }})
+    </a>
+    <a href="/import?status=failed"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'failed' %}background: var(--red); color: white;{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Failed ({{ counts.failed }})
+    </a>
+    <a href="/import?status=duplicate"
+       style="padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.9rem;
+              {% if status == 'duplicate' %}background: var(--orange); color: white;{% else %}background: var(--surface2); color: var(--text-dim);{% endif %}">
+        Duplicate ({{ counts.duplicate }})
+    </a>
+</div>
+
+{% if items %}
+{% for item in items %}
+<div class="card" style="display: flex; gap: 1rem; align-items: center;">
+    <div style="flex: 1; min-width: 0;">
+        <div style="font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            <a href="{{ item.url }}" target="_blank" style="color: var(--accent);">{{ item.url }}</a>
+        </div>
+        {% if item.page_name %}
+        <div style="font-size: 0.8rem; color: var(--text-dim); margin-top: 0.25rem;">
+            Page: {{ item.page_name }}
+        </div>
+        {% endif %}
+        <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 0.25rem;">
+            Submitted: {{ item.submitted_at[:16] }}
+            {% if item.processed_at %} | Processed: {{ item.processed_at[:16] }}{% endif %}
+        </div>
+        {% if item.error %}
+        <div style="font-size: 0.8rem; color: var(--red); margin-top: 0.25rem;">
+            {{ item.error }}
+        </div>
+        {% endif %}
+        {% if item.post_id %}
+        <div style="font-size: 0.8rem; margin-top: 0.25rem;">
+            <a href="/posts/{{ item.post_id | urlencode }}">View post</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <div style="flex-shrink: 0; display: flex; gap: 0.5rem;">
+        {% if item.status == 'pending' %}
+        <form method="post" action="/import/{{ item.id }}/delete" style="display: inline;">
+            <button type="submit" style="background: none; color: var(--text-dim); border: 1px solid var(--border);
+                    padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                Remove
+            </button>
+        </form>
+        {% elif item.status == 'failed' %}
+        <form method="post" action="/import/{{ item.id }}/retry" style="display: inline;">
+            <button type="submit" style="background: var(--accent); color: white; border: none;
+                    padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                Retry
+            </button>
+        </form>
+        <form method="post" action="/import/{{ item.id }}/delete" style="display: inline;">
+            <button type="submit" style="background: none; color: var(--text-dim); border: 1px solid var(--border);
+                    padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">
+                Remove
+            </button>
+        </form>
+        {% elif item.status == 'scraped' %}
+        <span style="color: var(--green); font-size: 0.85rem;">Scraped</span>
+        {% elif item.status == 'duplicate' %}
+        <span style="color: var(--orange); font-size: 0.85rem;">Already exists</span>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+
+{% if items|length >= 100 %}
+<div style="text-align: center; padding: 1rem; color: var(--text-dim);">
+    Showing first 100 items.
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <p>No {{ status }} imports.</p>
+    {% if status == 'pending' %}
+    <p style="font-size: 0.9rem;">Paste post URLs above and the anonymous scraper will fetch them on the next run.</p>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}
