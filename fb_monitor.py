@@ -289,11 +289,22 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
                 continue
 
             # --- Download attachments ---
+            # Build proxy URL for media downloads (only for anonymous/Tor sessions)
+            dl_proxy_url = ""
+            if not is_logged_in:
+                tor_proxy = get_tor_proxy(config)
+                if tor_proxy:
+                    dl_proxy_url = tor_proxy["server"]
+
+            skip_downloads = config.get("skip_media_downloads", False)
+
             attachment_result = download_attachments(
                 post_url=post.url,
                 image_urls=post_data.image_urls,
                 video_urls=post_data.video_urls,
                 output_dir=post_dir,
+                proxy_url=dl_proxy_url,
+                skip_downloads=skip_downloads,
             )
 
             # --- Save post.json ---

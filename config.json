@@ -30,6 +30,7 @@
     "comment_recheck_interval_minutes": 90
   },
   "output_dir": "downloads",
+  "skip_media_downloads": false,
   "headless": true,
   "tor": {
     "enabled": false,
