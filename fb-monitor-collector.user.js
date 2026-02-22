@@ -10,6 +10,8 @@
 // @grant        GM_getValue
 // @connect      localhost
 // @connect      127.0.0.1
+// @connect      fbcdn.net
+// @connect      *.fbcdn.net
 // ==/UserScript==
 
 (function () {
@@ -417,6 +419,67 @@
     return comments;
   }
 
+  // --- Capture image data from browser ---
+  function fetchImageAsBase64(url) {
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url,
+        responseType: 'arraybuffer',
+        onload: function (response) {
+          try {
+            const bytes = new Uint8Array(response.response);
+            let binary = '';
+            for (let i = 0; i < bytes.length; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            const base64 = btoa(binary);
+            const contentType = response.responseHeaders?.match(/content-type:\s*(\S+)/i)?.[1] || 'image/jpeg';
+            resolve({ url, data: base64, content_type: contentType });
+          } catch (e) {
+            console.warn('[FB Monitor] Failed to capture image:', url, e);
+            resolve(null);
+          }
+        },
+        onerror: function () {
+          console.warn('[FB Monitor] Failed to fetch image:', url);
+          resolve(null);
+        }
+      });
+    });
+  }
+
+  async function captureImagesForPosts(posts) {
+    const status = document.getElementById('fbm-status');
+    let totalImages = 0;
+    for (const post of posts) totalImages += post.image_urls.length;
+
+    if (totalImages === 0) return posts;
+
+    status.textContent = `Capturing ${totalImages} images from browser...`;
+    let captured = 0;
+
+    for (const post of posts) {
+      if (post.image_urls.length === 0) continue;
+
+      post.image_data = [];
+      // Fetch images in parallel (per post)
+      const promises = post.image_urls.map(url => fetchImageAsBase64(url));
+      const results = await Promise.all(promises);
+
+      for (const result of results) {
+        if (result) {
+          post.image_data.push(result);
+          captured++;
+          status.textContent = `Capturing images: ${captured}/${totalImages}`;
+        }
+      }
+    }
+
+    status.textContent = `Captured ${captured}/${totalImages} images`;
+    return posts;
+  }
+
   // --- Send to API ---
   function sendToApi(posts, pageName) {
     const status = document.getElementById('fbm-status');
@@ -437,7 +500,7 @@
         try {
           const result = JSON.parse(response.responseText);
           let msg = `Saved ${result.saved || 0} posts, ${result.comments || 0} comments`;
-          if (result.images_downloaded) msg += `, ${result.images_downloaded} images`;
+          if (result.images_saved) msg += `, ${result.images_saved} images saved`;
           if (result.videos_queued) msg += `, ${result.videos_queued} videos queued`;
           status.textContent = msg;
           status.style.color = '#4caf7d';
@@ -458,7 +521,7 @@
     expandAllVisible();
   });
 
-  document.getElementById('fbm-extract-btn').addEventListener('click', () => {
+  document.getElementById('fbm-extract-btn').addEventListener('click', async () => {
     const status = document.getElementById('fbm-status');
     const posts = extractPosts();
     extractedCount = posts.length;
@@ -481,10 +544,15 @@
     status.textContent = `Found ${posts.length} posts, ${totalComments} comments, ${totalImages} images, ${totalVideos} videos`;
     status.style.color = '#e1e4ed';
 
+    // Capture image data from the browser (images are already loaded)
+    if (totalImages > 0) {
+      await captureImagesForPosts(posts);
+    }
+
     // Also log to console for debugging
     console.log(`[FB Monitor] Extracted ${posts.length} posts:`, posts);
 
-    // Send to API
+    // Send to API (includes captured image data)
     sendToApi(posts, pageName);
   });
 

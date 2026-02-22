@@ -25,6 +25,8 @@ from fastapi import FastAPI, Body, Form, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+import base64
+
 import database as db
 from downloader import download_images, download_video_ytdlp
 
@@ -961,7 +963,7 @@ async def api_ingest(request: Request):
     saved = 0
     skipped = 0
     total_comments = 0
-    total_images_downloaded = 0
+    total_images_saved = 0
     total_videos_queued = 0
 
     for post in posts:
@@ -1010,17 +1012,39 @@ async def api_ingest(request: Request):
             total_comments += new_comments
 
         image_urls = post.get("image_urls", [])
+        image_data = post.get("image_data", [])
         video_urls = post.get("video_urls", [])
         post_url_str = post.get("post_url", "")
 
-        # Auto-download images immediately (CDN URLs expire)
-        if image_urls:
+        # Save images — prefer inline base64 data (captured from browser)
+        if image_data:
+            attachments_dir = post_dir / "attachments"
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            saved_paths = []
+            for i, img in enumerate(image_data):
+                try:
+                    raw = base64.b64decode(img["data"])
+                    ct = img.get("content_type", "image/jpeg")
+                    ext = {
+                        "image/jpeg": ".jpg", "image/png": ".png",
+                        "image/gif": ".gif", "image/webp": ".webp",
+                    }.get(ct, ".jpg")
+                    filepath = attachments_dir / f"image_{i+1}{ext}"
+                    filepath.write_bytes(raw)
+                    saved_paths.append(str(filepath))
+                except Exception as e:
+                    log.warning(f"Failed to save inline image for {post_id}: {e}")
+            if saved_paths:
+                db.save_attachments(post_id, {"images": saved_paths, "videos": []})
+                total_images_saved += len(saved_paths)
+        elif image_urls:
+            # Fallback: download from CDN URLs (may fail for private/expired)
             attachments_dir = post_dir / "attachments"
             try:
                 downloaded = download_images(image_urls, attachments_dir)
                 if downloaded:
                     db.save_attachments(post_id, {"images": downloaded, "videos": []})
-                    total_images_downloaded += len(downloaded)
+                    total_images_saved += len(downloaded)
             except Exception as e:
                 log.warning(f"Ingest image download failed for {post_id}: {e}")
 
@@ -1040,7 +1064,7 @@ async def api_ingest(request: Request):
         "saved": saved,
         "skipped": skipped,
         "comments": total_comments,
-        "images_downloaded": total_images_downloaded,
+        "images_saved": total_images_saved,
         "videos_queued": total_videos_queued,
         "total_submitted": len(posts),
     }
