@@ -16,8 +16,8 @@ import logging
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Body, Form, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import database as db
@@ -707,6 +707,44 @@ async def api_entity(entity_id: int):
     entity["pages"] = db.get_entity_pages(entity_id)
     entity["people"] = db.get_entity_people(entity_id)
     return entity
+
+
+@app.post("/api/import")
+async def api_import_urls(request: Request, page_name: str = Query("")):
+    """
+    Bulk import URLs via API.
+
+    Accepts:
+    - text/plain body: one URL per line
+    - application/json body: {"urls": [...], "page_name": "..."}
+
+    Usage:
+        curl -X POST http://localhost:8000/api/import -H "Content-Type: text/plain" --data-binary @urls.txt
+        curl -X POST http://localhost:8000/api/import -H "Content-Type: application/json" \
+             -d '{"urls": ["https://facebook.com/page/posts/123"], "page_name": "My Page"}'
+    """
+    content_type = request.headers.get("content-type", "")
+    body = await request.body()
+
+    if "application/json" in content_type:
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        url_list = data.get("urls", [])
+        page_name = data.get("page_name", page_name)
+    else:
+        # Treat as plain text — one URL per line
+        text = body.decode("utf-8", errors="ignore")
+        url_list = [u.strip() for u in text.splitlines() if u.strip()]
+
+    if not url_list:
+        return JSONResponse({"error": "No URLs provided"}, status_code=400)
+
+    added = db.add_import_urls(url_list, page_name=page_name)
+    skipped = len(url_list) - added
+
+    return {"added": added, "skipped": skipped, "total_submitted": len(url_list)}
 
 
 @app.get("/api/categories")

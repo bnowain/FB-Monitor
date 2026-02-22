@@ -32,6 +32,39 @@
     </form>
 </div>
 
+<details class="card" style="cursor: pointer;">
+    <summary style="font-weight: 600; font-size: 0.95rem; color: var(--accent); user-select: none;">
+        How to collect post URLs from Facebook
+    </summary>
+    <div style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-dim); line-height: 1.7;">
+        <p><strong>Step 1:</strong> Open the Facebook page in your browser (logged in).</p>
+        <p><strong>Step 2:</strong> Scroll down to load all the posts you want to capture.</p>
+        <p><strong>Step 3:</strong> Open DevTools (F12) &rarr; Console tab, paste this snippet, and press Enter:</p>
+        <pre style="background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+                    padding: 0.75rem; margin: 0.75rem 0; overflow-x: auto; font-size: 0.82rem;
+                    line-height: 1.5; white-space: pre-wrap; word-break: break-all;"><code>let urls = [...document.querySelectorAll('a[href]')]
+  .map(a => a.href.split('?')[0])
+  .filter(url =>
+    /facebook\.com\/[^/]+\/posts\//.test(url) ||
+    /facebook\.com\/permalink\.php/.test(url) ||
+    /facebook\.com\/[^/]+\/photos\//.test(url) ||
+    /facebook\.com\/[^/]+\/videos\//.test(url) ||
+    /facebook\.com\/watch\//.test(url) ||
+    /facebook\.com\/reel\//.test(url) ||
+    /facebook\.com\/share\//.test(url)
+  )
+  .filter((v, i, a) => a.indexOf(v) === i);
+console.log(`Found ${urls.length} post URLs:`);
+copy(urls.join('\n'));
+console.log(urls.join('\n'));
+console.log('Copied to clipboard!');</code></pre>
+        <p><strong>Step 4:</strong> Paste the copied URLs into the text area above, or save to a file and use the API:</p>
+        <pre style="background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+                    padding: 0.75rem; margin: 0.75rem 0; overflow-x: auto; font-size: 0.82rem;
+                    line-height: 1.5;"><code>curl -X POST http://localhost:8000/api/import -H "Content-Type: text/plain" --data-binary @urls.txt</code></pre>
+    </div>
+</details>
+
 {% if message %}
 <div style="padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem;
             background: {% if message_type == 'error' %}#3a2020{% else %}#1a2e1a{% endif %};
