@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -809,6 +810,115 @@ async def api_import_urls(request: Request, page_name: str = Query("")):
         "added": added,
         "skipped": skipped,
         "urls": url_list,
+    }
+
+
+@app.post("/api/ingest")
+async def api_ingest(request: Request):
+    """
+    Ingest full post data from the browser extension.
+
+    Accepts structured JSON with posts, comments, image URLs, etc.
+    Each post is saved directly to the database with all its comments.
+
+    Expected payload:
+    {
+        "page_name": "Vote Kevin Crye",
+        "page_url": "https://www.facebook.com/votekevincrye",
+        "posts": [
+            {
+                "post_id": "abc123",
+                "post_url": "https://...",
+                "author": "...",
+                "text": "...",
+                "timestamp": "...",
+                "image_urls": [...],
+                "video_urls": [...],
+                "reaction_count": "...",
+                "comment_count_text": "...",
+                "share_count_text": "...",
+                "shared_from": null,
+                "links": [...],
+                "comments": [
+                    {"author": "...", "text": "...", "timestamp": "...", "is_reply": false}
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    page_name = data.get("page_name", "")
+    page_url = data.get("page_url", "")
+    posts = data.get("posts", [])
+
+    if not posts:
+        return JSONResponse({"error": "No posts provided"}, status_code=400)
+
+    saved = 0
+    skipped = 0
+    total_comments = 0
+
+    for post in posts:
+        post_id = post.get("post_id", "")
+        if not post_id:
+            continue
+
+        # Check if already exists
+        existing = db.get_post(post_id)
+        if existing:
+            skipped += 1
+            continue
+
+        # Build post data dict matching what db.save_post expects
+        post_data = {
+            "post_id": post_id,
+            "page_name": page_name or post.get("author", "Unknown"),
+            "page_url": page_url,
+            "url": post.get("post_url", ""),
+            "author": post.get("author", ""),
+            "text": post.get("text", ""),
+            "timestamp": post.get("timestamp", ""),
+            "timestamp_raw": post.get("timestamp", ""),
+            "shared_from": post.get("shared_from"),
+            "shared_original_url": None,
+            "links": post.get("links", []),
+            "reaction_count": post.get("reaction_count", ""),
+            "comment_count_text": post.get("comment_count_text", ""),
+            "share_count_text": post.get("share_count_text", ""),
+            "post_dir": "",
+        }
+
+        db.save_post(post_data, account="extension")
+        saved += 1
+
+        # Save comments
+        comments = post.get("comments", [])
+        if comments:
+            new_comments = db.save_comments(post_id, comments)
+            total_comments += new_comments
+
+        # Queue media for download if present
+        image_urls = post.get("image_urls", [])
+        video_urls = post.get("video_urls", [])
+        if image_urls or video_urls:
+            try:
+                db.queue_media_batch(
+                    post_id, image_urls, video_urls,
+                    post_url=post.get("post_url", ""),
+                    account="extension",
+                )
+            except Exception:
+                pass  # May fail on duplicates, that's fine
+
+    return {
+        "saved": saved,
+        "skipped": skipped,
+        "comments": total_comments,
+        "total_submitted": len(posts),
     }
 
 
