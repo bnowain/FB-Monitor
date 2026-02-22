@@ -31,7 +31,6 @@
     "control_port": 9051,
     "control_password": ""
   },
-  "anthropic_api_key": "",
   "notifications": {
     "enabled": false,
     "discord_webhook_url": "",
