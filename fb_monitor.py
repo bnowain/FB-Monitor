@@ -17,13 +17,16 @@ Usage:
 """
 
 import argparse
+import atexit
 import json
 import logging
 import os
 import random
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +49,7 @@ from database import (
     init_db, save_post as db_save_post, save_comments as db_save_comments,
     save_attachments as db_save_attachments, queue_media_batch,
     get_pending_imports, update_import_status, get_post as db_get_post,
+    cleanup_bad_data,
 )
 from tracker import (
     load_state, save_state, is_post_seen, mark_post_seen,
@@ -55,12 +59,14 @@ from tracker import (
 from stealth import (
     jittered_interval, human_delay, human_scroll,
     create_stealth_context, stealth_goto, RateLimiter,
-    get_tor_proxy, renew_tor_circuit,
+    get_tor_proxy, get_tor_proxy_for_port, renew_tor_circuit,
 )
 from sessions import (
     interactive_login, create_session_context, get_account_for_page,
     group_pages_by_account, list_accounts, delete_account,
 )
+from collector import inject as collector_inject, expand_and_extract
+from sanitize import is_login_wall
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -110,7 +116,7 @@ def verify_tor_connection(config: dict) -> bool:
             )
             context = browser.new_context()
             page = context.new_page()
-            page.goto("https://check.torproject.org/api", timeout=30000)
+            page.goto("https://check.torproject.org/api/ip", timeout=30000)
             body = page.inner_text("body")
             page.close()
             context.close()
@@ -204,6 +210,337 @@ def open_post_page(browser_context, url: str, rate_limiter: RateLimiter = None, 
         rate_limiter.record()
 
     return page
+
+
+# ---------------------------------------------------------------------------
+# Feed extraction (collector-based, fast polling)
+# ---------------------------------------------------------------------------
+
+def _close_session_safe(context, browser, needs_close):
+    """Clean up a browser session, ignoring errors."""
+    try:
+        context.close()
+        if browser and needs_close:
+            browser.close()
+    except Exception:
+        pass
+
+
+def _probe_tor_instances(config, url, pool, max_timeout=45):
+    """
+    Race all healthy Tor instances in parallel to find one with a working exit.
+
+    Each thread launches its own sync_playwright, creates a bare browser through
+    the instance's SOCKS port, navigates to the target URL, and checks for a
+    login wall. The first success sets a shared flag and returns the winning
+    TorInstance.
+
+    Returns the winning TorInstance, or None if all probes failed.
+    """
+    from playwright.sync_api import sync_playwright as _sync_pw
+
+    healthy = pool.get_healthy()
+    if len(healthy) < 2:
+        return None
+
+    winner = [None]  # mutable container for closure
+    cancel_event = threading.Event()
+    headless = config.get("headless", True)
+
+    def _probe(instance):
+        if cancel_event.is_set():
+            return None
+        start_time = time.time()
+        try:
+            proxy = get_tor_proxy_for_port(instance.socks_port)
+            with _sync_pw() as pw:
+                browser = pw.chromium.launch(headless=headless, proxy=proxy)
+                try:
+                    context = browser.new_context()
+                    page = context.new_page()
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+                    if cancel_event.is_set():
+                        duration = time.time() - start_time
+                        if pool:
+                            pool.record_probe_result(instance, False, duration)
+                        return None
+
+                    body = page.evaluate(
+                        "() => document.body.innerText.substring(0, 1000)"
+                    )
+                    if is_login_wall(body):
+                        duration = time.time() - start_time
+                        if pool:
+                            pool.record_probe_result(instance, False, duration)
+                        log.debug(f"  Probe instance {instance.index}: login wall")
+                        return None
+
+                    duration = time.time() - start_time
+                    if pool:
+                        pool.record_probe_result(instance, True, duration)
+                    log.info(f"  Probe: instance {instance.index} succeeded "
+                             f"(SOCKS:{instance.socks_port}, {duration:.1f}s)")
+                    return instance
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            duration = time.time() - start_time
+            if pool:
+                pool.record_probe_result(instance, False, duration)
+            log.debug(f"  Probe instance {instance.index} failed: {e}")
+            return None
+
+    log.info(f"  Racing {len(healthy)} Tor instances for {url.split('/')[-1]}...")
+
+    with ThreadPoolExecutor(max_workers=len(healthy)) as executor:
+        futures = {executor.submit(_probe, inst): inst for inst in healthy}
+
+        for future in as_completed(futures, timeout=max_timeout):
+            try:
+                result = future.result()
+                if result is not None and winner[0] is None:
+                    winner[0] = result
+                    cancel_event.set()
+                    break
+            except Exception:
+                pass
+
+    if winner[0] is None:
+        log.info("  Racing: all probes failed")
+    return winner[0]
+
+
+def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
+    """
+    Navigate to a feed page with Tor retry logic.
+    On login wall: rotate circuit, get fresh context, retry.
+
+    If tor_pool is provided and has >=2 healthy instances, races them first.
+    On race success, uses the winning instance's port for the real navigation.
+
+    Returns (page, context, browser, needs_close) on success, or None.
+    """
+    using_tor = config.get("tor", {}).get("enabled", False)
+    tor_rotate = (lambda: renew_tor_circuit(config)) if using_tor else None
+
+    # --- Phase 1: Race Tor pool instances (if available) ---
+    winning_port = None
+    if tor_pool and using_tor and len(tor_pool.get_healthy()) >= 2:
+        winner = _probe_tor_instances(config, url, tor_pool)
+        if winner:
+            winning_port = winner.socks_port
+
+    # If we have a winning port, use it for the real navigation
+    if winning_port:
+        rate_limiter.wait_if_needed(rotation_callback=tor_rotate)
+        proxy = get_tor_proxy_for_port(winning_port)
+        try:
+            launch_kwargs = {"headless": config.get("headless", True), "proxy": proxy}
+            browser = pw.chromium.launch(**launch_kwargs)
+            context = create_stealth_context(browser, config, proxy_override=proxy)
+            page = context.new_page()
+
+            stealth_goto(page, url)
+            _dismiss_dialogs(page)
+            rate_limiter.record()
+
+            # Verify no login wall on full stealth session
+            try:
+                body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
+                if is_login_wall(body):
+                    log.info("  Racing winner hit login wall on full load, falling back")
+                    _close_session_safe(context, browser, True)
+                    winning_port = None
+                else:
+                    log.info(f"  Feed page loaded via pool (SOCKS:{winning_port})")
+                    return page, context, browser, True
+            except Exception:
+                log.info(f"  Feed page loaded via pool (SOCKS:{winning_port})")
+                return page, context, browser, True
+
+        except Exception as e:
+            log.warning(f"  Racing winner failed on full load: {e}")
+            winning_port = None
+
+    # --- Phase 2: Sequential retries (fallback or no pool) ---
+    if tor_pool and using_tor:
+        log.info("  Falling back to sequential retries on main Tor instance")
+
+    for attempt in range(1, max_retries + 1):
+        rate_limiter.wait_if_needed(rotation_callback=tor_rotate)
+
+        try:
+            context, browser, needs_close = create_session_context(pw, "anonymous", config)
+        except Exception as e:
+            log.error(f"  Failed to create session (attempt {attempt}): {e}")
+            if attempt < max_retries and using_tor:
+                renew_tor_circuit(config)
+                time.sleep(3 + attempt * 2)
+            continue
+
+        page = context.new_page()
+
+        try:
+            stealth_goto(page, url)
+            _dismiss_dialogs(page)
+            rate_limiter.record()
+        except PlaywrightTimeout:
+            log.warning(f"  Attempt {attempt}/{max_retries}: timeout loading {url}")
+            _close_session_safe(context, browser, needs_close)
+            if using_tor and attempt < max_retries:
+                renew_tor_circuit(config)
+                time.sleep(3 + attempt * 2)
+                continue
+            return None
+        except Exception as e:
+            log.warning(f"  Attempt {attempt}/{max_retries}: navigation error: {e}")
+            _close_session_safe(context, browser, needs_close)
+            if using_tor and attempt < max_retries:
+                renew_tor_circuit(config)
+                time.sleep(3 + attempt * 2)
+                continue
+            return None
+
+        # Check for login wall
+        try:
+            body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
+            if is_login_wall(body):
+                log.info(f"  Attempt {attempt}/{max_retries}: login wall")
+                _close_session_safe(context, browser, needs_close)
+                if using_tor and attempt < max_retries:
+                    renew_tor_circuit(config)
+                    time.sleep(3 + attempt * 2)
+                    continue
+                return None
+        except Exception:
+            pass
+
+        log.info(f"  Feed page loaded (attempt {attempt})")
+        return page, context, browser, needs_close
+
+    return None
+
+
+def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> list[dict]:
+    """
+    Quick feed extraction cycle using injected collector.
+    Creates anonymous Tor sessions, navigates to each page's feed,
+    injects the collector JS, and extracts the latest posts.
+
+    Only processes pages assigned to anonymous accounts.
+    If tor_pool is provided, races instances for faster navigation.
+    Returns list of newly discovered post dicts.
+    """
+    state = load_state()
+    account_groups = group_pages_by_account(config)
+    anon_pages = account_groups.get("anonymous", [])
+
+    if not anon_pages:
+        return []
+
+    max_retries = config.get("feed_max_retries", 5)
+    all_new = []
+
+    with sync_playwright() as pw:
+        for page_cfg in anon_pages:
+            if not page_cfg.get("enabled", True):
+                continue
+
+            page_name = page_cfg["name"]
+            page_url = page_cfg["url"]
+            page_key = slugify(page_name)
+
+            log.info(f"Feed poll: {page_name}")
+
+            # Navigate with retry logic (races Tor pool if available)
+            result = _feed_navigate(pw, config, page_url, rate_limiter, max_retries, tor_pool=tor_pool)
+            if result is None:
+                log.warning(f"  Could not load feed for {page_name}")
+                continue
+
+            page, context, browser, needs_close = result
+
+            try:
+                # Scroll to load posts
+                human_scroll(page, scroll_count=random.randint(2, 4))
+                page.wait_for_timeout(2000)
+
+                # Inject collector and extract
+                if not collector_inject(page):
+                    log.warning(f"  Collector injection failed for {page_name}")
+                    continue
+
+                posts = expand_and_extract(
+                    page, page_name=page_name, page_url=page_url,
+                )
+
+                if not posts:
+                    log.info(f"  No posts extracted from {page_name}")
+                    continue
+
+                # Filter to new posts only
+                new_count = 0
+                for post in posts:
+                    post_id = post.get("post_id", "")
+                    if not post_id or is_post_seen(state, page_key, post_id):
+                        continue
+
+                    # Save to DB
+                    db_save_post(post, account="anonymous")
+
+                    comments = post.get("comments", [])
+                    if comments:
+                        db_save_comments(post_id, comments)
+
+                    # Save post.json to disk
+                    output_base = Path(config.get("output_dir", "downloads")) / page_key
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    safe_id = re.sub(r'[^\w]', '_', post_id)[:50]
+                    post_dir = output_base / f"{timestamp}_{safe_id}"
+                    post_dir.mkdir(parents=True, exist_ok=True)
+
+                    post_json = dict(post)
+                    post_json.pop("comments", None)
+                    post_json["post_dir"] = str(post_dir)
+                    post_json["attachments"] = {
+                        "images": [], "videos": [],
+                        "image_urls": post.get("image_urls", []),
+                        "video_urls": post.get("video_urls", []),
+                    }
+
+                    post_json_path = post_dir / "post.json"
+                    with open(post_json_path, "w", encoding="utf-8") as f:
+                        json.dump(post_json, f, indent=2, ensure_ascii=False)
+
+                    # Register for comment tracking
+                    add_tracking_job(state, post_id, post.get("url", ""),
+                                     str(post_dir), page_name, "anonymous")
+
+                    mark_post_seen(state, page_key, post_id)
+
+                    preview = post.get("text", "")[:120] or "(no text)"
+                    send_notification(config, page_name, post.get("url", ""), preview)
+
+                    all_new.append(post)
+                    new_count += 1
+                    log.info(f"  NEW: {post_id[:50]}")
+
+                if new_count == 0:
+                    log.info(f"  No new posts on {page_name} ({len(posts)} already seen)")
+
+            finally:
+                _close_session_safe(context, browser, needs_close)
+
+            # Delay between pages
+            if page_cfg != anon_pages[-1]:
+                time.sleep(human_delay(2.0, 5.0))
+
+    save_state(state)
+    return all_new
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +1020,7 @@ def _rotate_tor_session(pw, config: dict, old_context, old_browser, rate_limiter
     return context, browser, True
 
 
-def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: RateLimiter):
+def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: RateLimiter, skip_anon_detect: bool = False):
     """
     Run one full cycle: detect new posts + recheck comments.
 
@@ -694,6 +1031,9 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
     Logged-in accounts use conservative timing to look like a
     real person casually browsing. Anonymous sessions use Tor and
     can poll more aggressively.
+
+    When skip_anon_detect=True, skips Phase 1 (detect_new_posts) for
+    anonymous accounts — used when feed_poll_cycle handles detection.
     """
     state = load_state()
 
@@ -747,7 +1087,11 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
 
             # For anonymous accounts, also check if there are imports to process
             should_process_imports = not _is_logged_in(account) and has_pending_imports
-            if not pages_for_account and not rechecks_for_account and not should_process_imports:
+            # When feed poll handles anonymous detection, only open anonymous
+            # session for rechecks/imports
+            anon_detect_skipped = skip_anon_detect and not _is_logged_in(account)
+            has_detect_work = pages_for_account and not anon_detect_skipped
+            if not has_detect_work and not rechecks_for_account and not should_process_imports:
                 continue
 
             is_login = _is_logged_in(account)
@@ -771,7 +1115,9 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
 
             try:
                 # Phase 1: Detect new posts
-                if pages_for_account:
+                # Skip for anonymous when feed_poll_cycle handles detection
+                should_detect = pages_for_account and not (skip_anon_detect and not is_login)
+                if should_detect:
                     # Conservative pre-delay for logged-in accounts
                     if is_login:
                         lo, hi = logged_in_cfg.get("delay_between_pages_sec", [15, 45])
@@ -859,6 +1205,8 @@ def run_cycle(config: dict, anon_rate_limiter: RateLimiter, login_rate_limiter: 
 # ---------------------------------------------------------------------------
 
 def main():
+    global CONFIG_PATH
+
     parser = argparse.ArgumentParser(description="Facebook Page Monitor")
     parser.add_argument("--watch", action="store_true", help="Run continuously")
     parser.add_argument("--list", action="store_true", help="List configured pages")
@@ -868,6 +1216,7 @@ def main():
     parser.add_argument("--login", type=str, metavar="ACCOUNT", help="Log in to an account (opens browser)")
     parser.add_argument("--accounts", action="store_true", help="List saved account sessions")
     parser.add_argument("--logout", type=str, metavar="ACCOUNT", help="Delete a saved account session")
+    parser.add_argument("--cleanup", type=str, nargs="?", const="", metavar="PAGE_NAME", help="Clean bad data (login walls, chrome, garbage comments). Optionally specify a page name.")
     parser.add_argument("--deep-scrape", type=str, metavar="PAGE_NAME", help="Deep scrape a page's full history with logged-in session")
     parser.add_argument("--max-posts", type=int, default=0, help="Max posts to process in deep scrape (0=unlimited)")
     parser.add_argument("--account", type=str, default="", help="Account to use for deep scrape")
@@ -875,7 +1224,6 @@ def main():
     parser.add_argument("--config", type=str, default=str(CONFIG_PATH), help="Path to config file")
     args = parser.parse_args()
 
-    global CONFIG_PATH
     CONFIG_PATH = Path(args.config)
 
     if not CONFIG_PATH.exists():
@@ -961,6 +1309,25 @@ def main():
         print("State cleared.")
         return
 
+    # --- Data cleanup ---
+    if args.cleanup is not None:
+        page = args.cleanup
+        label = f"page '{page}'" if page else "all pages"
+        print(f"\nRunning data quality cleanup on {label}...")
+        results = cleanup_bad_data(page)
+        print(f"\nCleanup results:")
+        print(f"  Login wall posts deleted:  {results.get('login_wall_posts_deleted', 0)}")
+        print(f"  Garbage posts deleted:     {results.get('garbage_posts_deleted', 0)}")
+        print(f"  Posts with chrome stripped: {results.get('posts_chrome_stripped', 0)}")
+        print(f"  Post text/comment swapped: {results.get('posts_text_swapped', 0)}")
+        print(f"  Timestamps resolved:       {results.get('timestamps_resolved', 0)}")
+        print(f"  Reaction counts cleaned:   {results.get('reaction_counts_cleaned', 0)}")
+        print(f"  Garbage comments deleted:  {results.get('garbage_comments_deleted', 0)}")
+        if results.get("error"):
+            print(f"\n  Error: {results['error']}")
+        print()
+        return
+
     # --- Deep scrape mode ---
     if args.deep_scrape:
         from deep_scrape import deep_scrape_page
@@ -1008,6 +1375,29 @@ def main():
             log.error("Aborting: Tor is enabled but connection could not be verified.")
             sys.exit(1)
 
+    # --- Start Tor pool if configured ---
+    tor_pool = None
+    tor_cfg = config.get("tor", {})
+    pool_size = tor_cfg.get("pool_size", 0)
+
+    if tor_cfg.get("enabled") and pool_size >= 2:
+        try:
+            from tor_pool import TorPool
+            log.info(f"Starting Tor pool ({pool_size} instances)...")
+            tor_pool = TorPool(config)
+            tor_pool.start()
+            ready = tor_pool.wait_ready()
+            if ready == 0:
+                log.warning("Tor pool: no instances ready, will use single instance")
+                tor_pool.stop()
+                tor_pool = None
+            else:
+                # Register cleanup on exit
+                atexit.register(tor_pool.stop)
+        except Exception as e:
+            log.warning(f"Tor pool failed to start: {e}")
+            tor_pool = None
+
     # Build rate limiters — separate limits for anonymous vs logged-in
     anon_max = config.get("max_requests_per_hour", 30)
     login_max = config.get("logged_in_polling", {}).get("max_requests_per_hour", 8)
@@ -1015,57 +1405,132 @@ def main():
     login_rate_limiter = RateLimiter(max_per_hour=login_max)
 
     if args.watch:
-        interval = config.get("check_interval_minutes", 15)
+        full_interval = config.get("check_interval_minutes", 15)
+        use_feed = config.get("feed_extraction", True)
+        feed_interval = config.get("feed_poll_minutes", 3)
 
-        log.info(f"Watch mode — base interval: {interval}min (±40% jitter)")
+        if use_feed:
+            log.info(f"Watch mode — feed poll: {feed_interval}min, "
+                     f"full cycle: {full_interval}min")
+        else:
+            log.info(f"Watch mode — base interval: {full_interval}min (±40% jitter)")
         log.info(f"Comment tracking: {config.get('comment_tracking_hours', 24)}h window")
         log.info(f"Rate limits: anonymous={anon_max}/hr, logged-in={login_max}/hr")
         if config.get("tor", {}).get("enabled"):
-            log.info("Tor: enabled for anonymous sessions only")
+            pool_label = f", pool: {pool_size} instances" if tor_pool else ""
+            log.info(f"Tor: enabled for anonymous sessions only{pool_label}")
+
+        last_full_cycle = 0  # epoch — ensures first iteration runs full cycle
+        iteration = 0
 
         while True:
             try:
-                new_posts, new_comments, imports = run_cycle(
-                    config, anon_rate_limiter, login_rate_limiter
-                )
+                now = time.time()
+                feed_new = []
+                full_new = []
+                new_comments = 0
+                imports = 0
 
-                # Jittered sleep — never the same interval twice
-                sleep_secs = jittered_interval(interval)
+                # --- Feed poll (fast, anonymous/Tor) ---
+                if use_feed:
+                    try:
+                        feed_new = feed_poll_cycle(config, anon_rate_limiter, tor_pool=tor_pool)
+                        if feed_new:
+                            log.info(f"Feed poll: {len(feed_new)} new post(s)")
+                    except Exception as e:
+                        log.error(f"Feed poll error: {e}")
+
+                # --- Full cycle on schedule ---
+                full_due = (now - last_full_cycle) >= full_interval * 60
+                if full_due or iteration == 0:
+                    try:
+                        full_new, new_comments, imports = run_cycle(
+                            config, anon_rate_limiter, login_rate_limiter,
+                            skip_anon_detect=use_feed,
+                        )
+                        last_full_cycle = time.time()
+                    except Exception as e:
+                        log.error(f"Full cycle error: {e}")
+
+                # --- Status ---
+                total_new = len(feed_new) + len(full_new)
+                sleep_secs = jittered_interval(feed_interval if use_feed else full_interval)
                 sleep_mins = sleep_secs / 60
+                next_full_mins = max(0, (full_interval * 60 - (time.time() - last_full_cycle))) / 60
+
+                pool_status = ""
+                if tor_pool:
+                    healthy = len(tor_pool.get_healthy())
+                    total_restarts = sum(i.restart_count for i in tor_pool.instances)
+                    stalled = sum(1 for i in tor_pool.instances
+                                  if i.state.value == "stalled")
+                    extras = []
+                    if total_restarts:
+                        extras.append(f"{total_restarts} restart{'s' if total_restarts != 1 else ''}")
+                    if stalled:
+                        extras.append(f"{stalled} stalled")
+                    extra_str = ", " + ", ".join(extras) if extras else ""
+                    pool_status = f", pool: {healthy}/{pool_size} healthy{extra_str}"
+
                 log.info(
-                    f"Cycle complete: {len(new_posts)} new post(s), "
+                    f"Cycle {iteration}: {total_new} new post(s), "
                     f"{new_comments} new comment(s), "
                     f"{imports} imported. "
-                    f"Next check in {sleep_mins:.1f}min "
-                    f"(anon: {anon_rate_limiter.count_last_hour()}/{anon_max}/hr, "
-                    f"login: {login_rate_limiter.count_last_hour()}/{login_max}/hr)"
+                    f"Next poll in {sleep_mins:.1f}min"
+                    f"{f', full cycle in {next_full_mins:.0f}min' if use_feed else ''}"
+                    f" (anon: {anon_rate_limiter.count_last_hour()}/{anon_max}/hr"
+                    f", login: {login_rate_limiter.count_last_hour()}/{login_max}/hr"
+                    f"{pool_status})"
                 )
+
+                iteration += 1
                 time.sleep(sleep_secs)
             except KeyboardInterrupt:
+                if tor_pool:
+                    log.info("Stopping Tor pool...")
+                    tor_pool.stop()
                 log.info("Stopped.")
                 break
     else:
-        new_posts, new_comments, imports = run_cycle(
-            config, anon_rate_limiter, login_rate_limiter
-        )
-        print(f"\n{'=' * 50}")
-        print(f"Results: {len(new_posts)} new post(s), {new_comments} new comment(s), {imports} imported")
+        # Single run: feed poll + full cycle
+        use_feed = config.get("feed_extraction", True)
+        all_new = []
 
-        if new_posts:
+        if use_feed:
+            try:
+                feed_new = feed_poll_cycle(config, anon_rate_limiter, tor_pool=tor_pool)
+                all_new.extend(feed_new)
+            except Exception as e:
+                log.error(f"Feed poll error: {e}")
+
+        full_new, new_comments, imports = run_cycle(
+            config, anon_rate_limiter, login_rate_limiter,
+            skip_anon_detect=use_feed,
+        )
+        all_new.extend(full_new)
+
+        # Stop pool after single run
+        if tor_pool:
+            tor_pool.stop()
+
+        print(f"\n{'=' * 50}")
+        print(f"Results: {len(all_new)} new post(s), {new_comments} new comment(s), {imports} imported")
+
+        if all_new:
             print(f"\nNew posts:")
-            for p in new_posts:
+            for p in all_new:
                 text = p.get("text", "")[:80]
-                shared = f" (shared from {p['shared_from']})" if p.get("shared_from") else ""
-                imgs = len(p.get("attachments", {}).get("images", []))
-                vids = len(p.get("attachments", {}).get("videos", []))
-                print(f"  📄 {p.get('page_name', '?')}{shared}")
+                shared = f" (shared from {p.get('shared_from', '')})" if p.get("shared_from") else ""
+                imgs = len(p.get("image_urls", []))
+                vids = len(p.get("video_urls", []))
+                page_nm = p.get("page_name", "?")
+                print(f"  {page_nm}{shared}")
                 print(f"     {text}...")
-                print(f"     {p['url']}")
+                print(f"     {p.get('url', '?')}")
                 if imgs:
-                    print(f"     🖼  {imgs} image(s)")
+                    print(f"     {imgs} image(s)")
                 if vids:
-                    print(f"     🎬 {vids} video(s)")
-                print(f"     📁 {p.get('post_dir', '')}")
+                    print(f"     {vids} video(s)")
                 print()
 
 
