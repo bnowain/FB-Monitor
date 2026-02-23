@@ -75,7 +75,11 @@
                 {{ post.text[:400] }}{% if post.text|length > 400 %}...{% endif %}
             </div>
 
-            {% if post.first_image_id %}
+            {% if post.first_image_url %}
+            <div class="feed-card-image">
+                <img src="{{ post.first_image_url }}" alt="Post image" loading="lazy">
+            </div>
+            {% elif post.first_image_id %}
             <div class="feed-card-image">
                 <img src="/attachment/{{ post.first_image_id }}" alt="Post image" loading="lazy">
             </div>

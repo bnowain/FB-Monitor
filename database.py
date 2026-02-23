@@ -306,11 +306,14 @@ def save_attachments(post_id: str, attachments: dict, db_path: Optional[Path] = 
     """
     Save attachment metadata for a post.
 
-    attachments dict should have "images" and "videos" lists of file paths.
+    attachments dict may have:
+    - "images"/"videos": lists of downloaded file paths
+    - "image_urls"/"video_urls": lists of source URLs (stored even without download)
     """
     conn = get_connection(db_path)
     now = datetime.now(timezone.utc).isoformat()
     try:
+        # Downloaded files (have local paths)
         for img_path in attachments.get("images", []):
             p = Path(img_path)
             conn.execute("""
@@ -324,6 +327,19 @@ def save_attachments(post_id: str, attachments: dict, db_path: Optional[Path] = 
                 INSERT OR IGNORE INTO attachments (post_id, type, local_path, filename, downloaded_at)
                 VALUES (?, 'video', ?, ?, ?)
             """, (post_id, str(p), p.name, now))
+
+        # URL-only attachments (not yet downloaded)
+        for img_url in attachments.get("image_urls", []):
+            conn.execute("""
+                INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at)
+                VALUES (?, 'image', ?, ?)
+            """, (post_id, img_url, now))
+
+        for vid_url in attachments.get("video_urls", []):
+            conn.execute("""
+                INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at)
+                VALUES (?, 'video', ?, ?)
+            """, (post_id, vid_url, now))
 
         conn.commit()
     except Exception as e:
@@ -1341,6 +1357,83 @@ def cleanup_bad_data(page_name: str = "", db_path: Optional[Path] = None) -> dic
     except Exception as e:
         log.error(f"Cleanup failed: {e}")
         conn.rollback()
+        results["error"] = str(e)
+    finally:
+        conn.close()
+
+    return results
+
+
+def backfill_image_urls(db_path: Optional[Path] = None) -> dict:
+    """
+    Scan post.json files on disk and backfill image/video URLs into the
+    attachments table for posts that have no attachment rows yet.
+    """
+    conn = get_connection(db_path)
+    results = {"scanned": 0, "backfilled": 0, "urls_added": 0}
+
+    try:
+        rows = conn.execute(
+            "SELECT post_id, post_dir FROM posts WHERE post_dir IS NOT NULL AND post_dir != ''"
+        ).fetchall()
+
+        for row in rows:
+            post_id = row["post_id"]
+            post_dir = Path(row["post_dir"])
+            post_json = post_dir / "post.json"
+
+            if not post_json.exists():
+                continue
+            results["scanned"] += 1
+
+            # Check if this post already has attachments
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM attachments WHERE post_id=?", (post_id,)
+            ).fetchone()[0]
+            if existing > 0:
+                continue
+
+            try:
+                with open(post_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+
+            # Collect URLs from both top-level and attachments sub-dict
+            image_urls = set(data.get("image_urls", []))
+            video_urls = set(data.get("video_urls", []))
+            att = data.get("attachments", {})
+            if isinstance(att, dict):
+                image_urls.update(att.get("image_urls", []))
+                video_urls.update(att.get("video_urls", []))
+
+            if not image_urls and not video_urls:
+                continue
+
+            now = datetime.now(timezone.utc).isoformat()
+            added = 0
+            for url in image_urls:
+                if url:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at) VALUES (?, 'image', ?, ?)",
+                        (post_id, url, now),
+                    )
+                    added += 1
+            for url in video_urls:
+                if url:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at) VALUES (?, 'video', ?, ?)",
+                        (post_id, url, now),
+                    )
+                    added += 1
+
+            if added:
+                results["backfilled"] += 1
+                results["urls_added"] += added
+
+        conn.commit()
+    except Exception as e:
+        log.error(f"Backfill failed: {e}")
         results["error"] = str(e)
     finally:
         conn.close()

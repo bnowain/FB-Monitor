@@ -93,11 +93,12 @@ async def page_feed(
             "SELECT COUNT(*) FROM comments WHERE post_id=?", (pid,)
         ).fetchone()[0]
         first_image = conn.execute(
-            "SELECT id FROM attachments WHERE post_id=? AND type='image' ORDER BY id LIMIT 1", (pid,)
+            "SELECT id, local_path, url FROM attachments WHERE post_id=? AND type='image' ORDER BY id LIMIT 1", (pid,)
         ).fetchone()
         post["attachment_counts"] = {"images": img_count, "videos": vid_count}
         post["comment_count"] = comment_count
-        post["first_image_id"] = first_image[0] if first_image else None
+        post["first_image_id"] = first_image["id"] if first_image else None
+        post["first_image_url"] = first_image["url"] if first_image and not first_image["local_path"] else None
     conn.close()
 
     # Page metadata
@@ -854,6 +855,7 @@ async def import_retry(import_id: int):
 
 @app.get("/attachment/{attachment_id}")
 async def serve_attachment(attachment_id: int):
+    from starlette.responses import RedirectResponse
     conn = db.get_connection()
     row = conn.execute(
         "SELECT * FROM attachments WHERE id=?", (attachment_id,)
@@ -863,11 +865,19 @@ async def serve_attachment(attachment_id: int):
     if not row:
         return HTMLResponse("Not found", status_code=404)
 
-    path = Path(row["local_path"])
-    if not path.exists():
-        return HTMLResponse("File not found on disk", status_code=404)
+    # Serve local file if available
+    local_path = row["local_path"]
+    if local_path:
+        path = Path(local_path)
+        if path.exists():
+            return FileResponse(path)
 
-    return FileResponse(path)
+    # Fallback: redirect to source URL
+    url = row["url"]
+    if url:
+        return RedirectResponse(url)
+
+    return HTMLResponse("No file or URL available", status_code=404)
 
 
 # ---------------------------------------------------------------------------

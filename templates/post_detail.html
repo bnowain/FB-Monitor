@@ -257,13 +257,23 @@
         <div class="post-images">
             {% for att in attachments %}
             {% if att.type == 'image' %}
+            {% if att.local_path %}
             <a href="/attachment/{{ att.id }}" target="_blank">
                 <img src="/attachment/{{ att.id }}" alt="{{ att.filename }}" loading="lazy">
             </a>
+            {% elif att.url %}
+            <a href="{{ att.url }}" target="_blank">
+                <img src="{{ att.url }}" alt="Post image" loading="lazy">
+            </a>
+            {% endif %}
             {% elif att.type == 'video' %}
             <div class="video-placeholder">
                 <div class="icon">&#127909;</div>
+                {% if att.local_path %}
                 <a href="/attachment/{{ att.id }}">{{ att.filename }}</a>
+                {% elif att.url %}
+                <a href="{{ att.url }}" target="_blank">Video link</a>
+                {% endif %}
             </div>
             {% endif %}
             {% endfor %}
