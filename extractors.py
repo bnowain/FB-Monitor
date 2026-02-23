@@ -37,6 +37,13 @@ class ExtractedPost:
 def _normalize_url(href: str) -> str:
     href = re.split(r'[?&]__cft__', href)[0]
     href = re.split(r'[?&]__tn__', href)[0]
+    # Strip album/set tracking from photo URLs, keep only fbid
+    if '/photo' in href and 'fbid=' in href:
+        m = re.search(r'fbid=(\d+)', href)
+        if m:
+            href = re.sub(r'[?&]set=[^&]*', '', href)
+            # Clean up leftover ? or & at end
+            href = href.rstrip('?&')
     return href
 
 
