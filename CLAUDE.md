@@ -109,6 +109,43 @@ This project is part of a hub-and-spoke civic accountability research platform.
 - **Shasta-Campaign-Finance** — campaign finance disclosures from NetFile
 - **Facebook-Monitor** — public Facebook page monitoring (this project)
 
+## Testing
+
+No formal test suite exists yet. Use Playwright for browser-based UI testing and pytest for API/service tests. `test_extract.py` in project root is a manual extraction tester, not part of the automated suite.
+
+### Setup
+
+```bash
+pip install pytest httpx
+# Playwright is already a production dependency (used by scraper)
+python -m playwright install chromium  # if not already installed
+```
+
+### Running Tests
+
+```bash
+pytest tests/ -v
+pytest tests/ -v -k "browser"    # Playwright UI tests only
+pytest tests/ -v -k "api"        # API tests only
+```
+
+### Writing Tests
+
+- **Browser tests** go in `tests/test_browser.py` — use Playwright to verify the web UI (post list, post detail with comments, people/entity pages, import flow, stats dashboard)
+- **API tests** go in `tests/test_api.py` — use httpx against FastAPI endpoints (`/api/posts`, `/api/people`, `/api/search`)
+- **Service tests** go in `tests/test_services.py` — unit tests for extractors, post parser, comment extraction, sanitization
+- Playwright is already installed (primary scraper dependency)
+- The server must be running at localhost:8150 for browser tests
+- Do NOT run scraper tests against live Facebook — use saved HTML fixtures
+
+### Key Flows to Test
+
+1. **Post browsing**: list loads with filters, detail shows comments and attachments
+2. **Search**: full-text search returns relevant posts and comments
+3. **People/entities**: people and entity pages render with linked content
+4. **Import**: bulk URL import via API creates import queue entries
+5. **Stats**: dashboard shows correct aggregate statistics
+
 ## Master Schema & Codex References
 
 **`E:\0-Automated-Apps\MASTER_SCHEMA.md`** — Canonical cross-project database
