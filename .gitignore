@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime data
+fb_monitor.db
+fb_monitor.db-wal
+fb_monitor.db-shm
+state.json
+extractor_health.json
+
+# Tor bundle (large binaries, user-provided)
+tor-bundle/
+
+# Downloaded media
+downloads/
+
+# Browser profiles (session cookies)
+profiles/
+
+# Claude Code local settings
+.claude/
