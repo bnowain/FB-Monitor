@@ -267,14 +267,19 @@
             </a>
             {% endif %}
             {% elif att.type == 'video' %}
+            {% if att.local_path %}
+            <video controls preload="metadata" style="max-width:100%; border-radius:6px;">
+                <source src="/attachment/{{ att.id }}" type="video/mp4">
+                <a href="/attachment/{{ att.id }}">{{ att.filename }}</a>
+            </video>
+            {% else %}
             <div class="video-placeholder">
                 <div class="icon">&#127909;</div>
-                {% if att.local_path %}
-                <a href="/attachment/{{ att.id }}">{{ att.filename }}</a>
-                {% elif att.url %}
+                {% if att.url %}
                 <a href="{{ att.url }}" target="_blank">Video link</a>
                 {% endif %}
             </div>
+            {% endif %}
             {% endif %}
             {% endfor %}
         </div>

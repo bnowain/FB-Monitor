@@ -328,18 +328,20 @@ def save_attachments(post_id: str, attachments: dict, db_path: Optional[Path] = 
                 VALUES (?, 'video', ?, ?, ?)
             """, (post_id, str(p), p.name, now))
 
-        # URL-only attachments (not yet downloaded)
-        for img_url in attachments.get("image_urls", []):
-            conn.execute("""
-                INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at)
-                VALUES (?, 'image', ?, ?)
-            """, (post_id, img_url, now))
+        # URL-only attachments (skip if we already have downloaded files of same type)
+        if not attachments.get("images"):
+            for img_url in attachments.get("image_urls", []):
+                conn.execute("""
+                    INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at)
+                    VALUES (?, 'image', ?, ?)
+                """, (post_id, img_url, now))
 
-        for vid_url in attachments.get("video_urls", []):
-            conn.execute("""
-                INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at)
-                VALUES (?, 'video', ?, ?)
-            """, (post_id, vid_url, now))
+        if not attachments.get("videos"):
+            for vid_url in attachments.get("video_urls", []):
+                conn.execute("""
+                    INSERT OR IGNORE INTO attachments (post_id, type, url, downloaded_at)
+                    VALUES (?, 'video', ?, ?)
+                """, (post_id, vid_url, now))
 
         conn.commit()
     except Exception as e:

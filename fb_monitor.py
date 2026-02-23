@@ -60,6 +60,7 @@ from stealth import (
     jittered_interval, human_delay, human_scroll,
     create_stealth_context, stealth_goto, RateLimiter,
     get_tor_proxy, get_tor_proxy_for_port, renew_tor_circuit,
+    seed_browser_history, warm_up_browser,
 )
 from sessions import (
     interactive_login, create_session_context, get_account_for_page,
@@ -116,7 +117,7 @@ def verify_tor_connection(config: dict) -> bool:
             )
             context = browser.new_context()
             page = context.new_page()
-            page.goto("https://check.torproject.org/api/ip", timeout=30000)
+            page.goto("https://check.torproject.org/api/ip", timeout=60000)
             body = page.inner_text("body")
             page.close()
             context.close()
@@ -345,7 +346,9 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
             launch_kwargs = {"headless": config.get("headless", True), "proxy": proxy}
             browser = pw.chromium.launch(**launch_kwargs)
             context = create_stealth_context(browser, config, proxy_override=proxy)
+            seed_browser_history(context)
             page = context.new_page()
+            warm_up_browser(page, timeout=15000)
 
             stealth_goto(page, url)
             _dismiss_dialogs(page)
@@ -394,7 +397,9 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
                     headless=config.get("headless", True), proxy=proxy
                 )
                 context = create_stealth_context(browser, config, proxy_override=proxy)
+                seed_browser_history(context)
                 page = context.new_page()
+                warm_up_browser(page, timeout=15000)
 
                 stealth_goto(page, url)
                 _dismiss_dialogs(page)
@@ -443,7 +448,9 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
                 time.sleep(3 + attempt * 2)
             continue
 
+        seed_browser_history(context)
         page = context.new_page()
+        warm_up_browser(page, timeout=15000)
 
         try:
             stealth_goto(page, url)
@@ -557,22 +564,44 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                     if comments:
                         db_save_comments(post_id, comments)
 
-                    # Save attachments to DB
-                    attachment_result = {
-                        "images": [], "videos": [],
-                        "image_urls": post.get("image_urls", []),
-                        "video_urls": post.get("video_urls", []),
-                    }
-                    if attachment_result["image_urls"] or attachment_result["video_urls"]:
-                        db_save_attachments(post_id, attachment_result)
+                    # Download attachments through Tor (anonymous mode)
+                    image_urls = post.get("image_urls", [])
+                    video_urls = post.get("video_urls", [])
+                    post_url = post.get("url", "")
 
-                    # Save post.json to disk
                     output_base = Path(config.get("output_dir", "downloads")) / page_key
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     safe_id = re.sub(r'[^\w]', '_', post_id)[:50]
                     post_dir = output_base / f"{timestamp}_{safe_id}"
                     post_dir.mkdir(parents=True, exist_ok=True)
 
+                    skip_downloads = config.get("skip_media_downloads", False)
+                    dl_proxy_url = ""
+                    tor_proxy = get_tor_proxy(config)
+                    if tor_proxy:
+                        dl_proxy_url = tor_proxy["server"]
+                    dl_proxy_config = config.get("download_proxy")
+
+                    if image_urls or video_urls:
+                        attachment_result = download_attachments(
+                            post_url=post_url,
+                            image_urls=image_urls,
+                            video_urls=video_urls,
+                            output_dir=post_dir,
+                            proxy_url=dl_proxy_url,
+                            download_proxy=dl_proxy_config,
+                            skip_downloads=skip_downloads,
+                        )
+                    else:
+                        attachment_result = {
+                            "images": [], "videos": [],
+                            "image_urls": [], "video_urls": [],
+                        }
+
+                    if attachment_result.get("image_urls") or attachment_result.get("video_urls"):
+                        db_save_attachments(post_id, attachment_result)
+
+                    # Save post.json to disk
                     post_json = dict(post)
                     post_json.pop("comments", None)
                     post_json["post_dir"] = str(post_dir)

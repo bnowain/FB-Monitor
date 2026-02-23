@@ -463,6 +463,196 @@ def create_stealth_context(browser, config: dict, proxy_override=_SENTINEL):
 
 
 # ---------------------------------------------------------------------------
+# Lived-in browser: seed cookies, storage, and warm up
+# ---------------------------------------------------------------------------
+
+# Realistic cookies a normal browser would accumulate from daily browsing.
+# These are non-functional values — they just need to exist so the cookie
+# jar isn't suspiciously empty.
+_SEED_COOKIES = [
+    # Google — every real browser has these
+    {"name": "NID", "value": "", "domain": ".google.com", "path": "/",
+     "httpOnly": True, "secure": True, "sameSite": "None"},
+    {"name": "1P_JAR", "value": "", "domain": ".google.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    {"name": "CONSENT", "value": "", "domain": ".google.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    {"name": "AEC", "value": "", "domain": ".google.com", "path": "/",
+     "httpOnly": True, "secure": True, "sameSite": "Lax"},
+    # YouTube
+    {"name": "VISITOR_INFO1_LIVE", "value": "", "domain": ".youtube.com", "path": "/",
+     "httpOnly": True, "secure": True, "sameSite": "None"},
+    {"name": "YSC", "value": "", "domain": ".youtube.com", "path": "/",
+     "httpOnly": True, "secure": True, "sameSite": "None"},
+    {"name": "PREF", "value": "", "domain": ".youtube.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    # Reddit
+    {"name": "csv", "value": "", "domain": ".reddit.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    {"name": "edgebucket", "value": "", "domain": ".reddit.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    # Amazon
+    {"name": "session-id", "value": "", "domain": ".amazon.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    {"name": "i18n-prefs", "value": "", "domain": ".amazon.com", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    # Wikipedia
+    {"name": "WMF-Last-Access", "value": "", "domain": ".wikipedia.org", "path": "/",
+     "httpOnly": False, "secure": True, "sameSite": "None"},
+    # Generic tracking pixels most browsers accumulate
+    {"name": "_ga", "value": "", "domain": ".google.com", "path": "/",
+     "httpOnly": False, "secure": False, "sameSite": "Lax"},
+    {"name": "_gid", "value": "", "domain": ".google.com", "path": "/",
+     "httpOnly": False, "secure": False, "sameSite": "Lax"},
+]
+
+# localStorage entries that indicate a browser with history
+_SEED_STORAGE = {
+    "https://www.google.com": {
+        "gws:dark_mode": '{"e":false}',
+        "gws:sli": "1",
+    },
+    "https://www.youtube.com": {
+        "yt-player-quality": '{"data":"hd720","creation":0}',
+        "ytidb::LAST_RESULT_ENTRY_KEY": '{"data":"","creation":0}',
+        "yt.innertube::nextId": str(random.randint(1, 50)),
+    },
+}
+
+
+def _generate_cookie_value(name: str) -> str:
+    """Generate a plausible random value for a seed cookie."""
+    import hashlib
+    seed = f"{name}-{random.randint(0, 2**32)}-{time.time()}"
+    h = hashlib.md5(seed.encode()).hexdigest()
+
+    patterns = {
+        "NID": lambda: f"511={h[:60]}",
+        "1P_JAR": lambda: f"2026-02-{random.randint(10,28):02d}-{random.randint(0,23):02d}",
+        "CONSENT": lambda: f"PENDING+{random.randint(100, 999)}",
+        "AEC": lambda: f"AUE{h[:40]}",
+        "VISITOR_INFO1_LIVE": lambda: h[:11],
+        "YSC": lambda: h[:11],
+        "PREF": lambda: f"tz=America.Los_Angeles&f6={random.randint(40000, 50000):05x}",
+        "csv": lambda: str(random.randint(1, 2)),
+        "edgebucket": lambda: h[:18],
+        "session-id": lambda: f"{random.randint(100, 999)}-{random.randint(1000000, 9999999)}-{random.randint(1000000, 9999999)}",
+        "i18n-prefs": lambda: "USD",
+        "WMF-Last-Access": lambda: f"{random.randint(10,28):02d}-Feb-2026",
+        "_ga": lambda: f"GA1.1.{random.randint(100000000, 999999999)}.{int(time.time()) - random.randint(86400, 2592000)}",
+        "_gid": lambda: f"GA1.1.{random.randint(100000000, 999999999)}.{int(time.time()) - random.randint(0, 86400)}",
+    }
+    return patterns.get(name, lambda: h[:20])()
+
+
+def seed_browser_history(context):
+    """
+    Seed a browser context with cookies and localStorage to make it look
+    like a real browser that has been used for everyday browsing.
+
+    Call this AFTER creating the context but BEFORE navigating to Facebook.
+    """
+    # --- 1. Seed cookies with realistic values ---
+    cookies_to_add = []
+    now = int(time.time())
+    # Cookies should look like they were set days to weeks ago
+    for template in _SEED_COOKIES:
+        # Skip some randomly so each session looks slightly different
+        if random.random() < 0.15:
+            continue
+        cookie = dict(template)
+        cookie["value"] = _generate_cookie_value(cookie["name"])
+        # Expiry: 30-180 days from now (like real persistent cookies)
+        cookie["expires"] = now + random.randint(30 * 86400, 180 * 86400)
+        cookies_to_add.append(cookie)
+
+    try:
+        context.add_cookies(cookies_to_add)
+    except Exception as e:
+        log.debug(f"Cookie seeding partially failed (non-fatal): {e}")
+
+    # --- 2. Seed localStorage via a blank page ---
+    try:
+        page = context.new_page()
+        for origin, entries in _SEED_STORAGE.items():
+            try:
+                page.goto("about:blank")
+                js_entries = ", ".join(
+                    f"[{repr(k)}, {repr(v)}]" for k, v in entries.items()
+                )
+                page.evaluate(f"""() => {{
+                    try {{
+                        const entries = [{js_entries}];
+                        for (const [k, v] of entries) {{
+                            localStorage.setItem(k, v);
+                        }}
+                    }} catch(e) {{}}
+                }}""")
+            except Exception:
+                pass
+
+        # --- 3. Seed IndexedDB markers (signals long-term browser use) ---
+        page.evaluate("""() => {
+            try {
+                const req = indexedDB.open('_idb_check', 1);
+                req.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains('meta')) {
+                        db.createObjectStore('meta');
+                    }
+                };
+                req.onsuccess = (e) => {
+                    try {
+                        const db = e.target.result;
+                        const tx = db.transaction('meta', 'readwrite');
+                        tx.objectStore('meta').put(Date.now(), 'last_visit');
+                        db.close();
+                    } catch(ex) {}
+                };
+            } catch(e) {}
+        }""")
+
+        page.close()
+    except Exception as e:
+        log.debug(f"Storage seeding failed (non-fatal): {e}")
+
+    log.debug(f"Seeded browser history: {len(cookies_to_add)} cookies, "
+              f"{sum(len(v) for v in _SEED_STORAGE.values())} storage entries")
+
+
+def warm_up_browser(page, timeout: int = 15000):
+    """
+    Visit a non-suspicious site briefly before Facebook to build a
+    natural referrer chain and accumulate real cookies/headers.
+
+    Called with the page that will later navigate to Facebook.
+    """
+    warmup_sites = [
+        "https://www.google.com/search?q=weather",
+        "https://www.google.com/search?q=news+today",
+        "https://en.wikipedia.org/wiki/Main_Page",
+        "https://www.reddit.com/",
+        "https://news.ycombinator.com/",
+    ]
+
+    site = random.choice(warmup_sites)
+    try:
+        page.goto(site, wait_until="domcontentloaded", timeout=timeout)
+        # Brief human-like pause as if glancing at the page
+        page.wait_for_timeout(random.randint(1500, 4000))
+
+        # Occasionally scroll a bit
+        if random.random() < 0.4:
+            page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
+            page.wait_for_timeout(random.randint(800, 2000))
+
+        log.debug(f"Warm-up visit to {site.split('/')[2]}")
+    except Exception as e:
+        # Non-fatal — we tried
+        log.debug(f"Warm-up visit failed (non-fatal): {e}")
+
+
+# ---------------------------------------------------------------------------
 # Page load with delays
 # ---------------------------------------------------------------------------
 

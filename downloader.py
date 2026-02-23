@@ -15,6 +15,7 @@ Adds random delays between downloads to avoid burst patterns.
 import logging
 import random
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse, quote
@@ -214,6 +215,97 @@ def download_images(
     return saved
 
 
+def download_videos_direct(
+    video_urls: list[str],
+    output_dir: Path,
+    proxy_url: str = "",
+    download_proxy: dict | None = None,
+    delay_range: tuple[float, float] = (2.0, 6.0),
+) -> list[str]:
+    """
+    Download videos from direct CDN URLs via requests (like download_images).
+
+    Only attempts URLs that look like direct media files (CDN hostnames).
+    Skips Facebook page URLs (/videos/, /reel/, /watch/) — those need yt-dlp.
+
+    Returns list of saved file paths.
+    """
+    if not requests:
+        return []
+
+    saved = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    proxies = _get_proxy_dict(proxy_url)
+    use_remote = download_proxy and download_proxy.get("url")
+
+    for i, url in enumerate(video_urls):
+        # Only download direct CDN URLs, not Facebook page URLs
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+        if not any(cdn in hostname for cdn in ("fbcdn", "akamai", "cdninstagram", "fbvideo")):
+            continue
+
+        try:
+            ext = Path(parsed.path).suffix or ".mp4"
+            if ext not in (".mp4", ".webm", ".mkv", ".mov", ".avi"):
+                ext = ".mp4"
+
+            filename = f"video_{i + 1}{ext}"
+            filepath = output_dir / filename
+
+            if filepath.exists():
+                saved.append(str(filepath))
+                continue
+
+            if i > 0:
+                time.sleep(random.uniform(*delay_range))
+
+            if use_remote:
+                log.info(f"  Downloading video {i + 1}/{len(video_urls)} via remote proxy")
+                if _download_image_via_proxy(url, filepath, download_proxy):
+                    saved.append(str(filepath))
+            else:
+                log.info(f"  Downloading video {i + 1}/{len(video_urls)} direct"
+                         f"{' via SOCKS proxy' if proxy_url else ''}")
+                resp = requests.get(url, timeout=120, proxies=proxies, stream=True, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                })
+                resp.raise_for_status()
+
+                with open(filepath, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        f.write(chunk)
+                saved.append(str(filepath))
+                log.info(f"  Saved: {filepath}")
+
+        except Exception as e:
+            log.warning(f"  Failed to download video {url[:80]}: {e}")
+
+    return saved
+
+
+def _get_ytdlp_page_urls(video_urls: list[str], post_url: str) -> list[str]:
+    """
+    Extract Facebook page URLs from video_urls that need yt-dlp
+    (not direct CDN links). Also includes post_url if it looks like a video post.
+    Returns deduplicated list.
+    """
+    page_urls = []
+    for url in video_urls:
+        hostname = (urlparse(url).hostname or "")
+        if not any(cdn in hostname for cdn in ("fbcdn", "akamai", "cdninstagram", "fbvideo")):
+            if url not in page_urls:
+                page_urls.append(url)
+
+    # Also try the post URL itself if it's a video/reel page
+    if any(p in post_url for p in ("/videos/", "/watch/", "/reel/")):
+        if post_url not in page_urls:
+            page_urls.append(post_url)
+
+    return page_urls
+
+
 def download_video_ytdlp(
     post_url: str,
     output_dir: Path,
@@ -236,11 +328,11 @@ def download_video_ytdlp(
         log.info("  Downloading video via remote proxy...")
         return _download_video_via_proxy(post_url, output_dir, download_proxy)
 
-    # Otherwise run yt-dlp locally
+    # Run yt-dlp as a Python module (more reliable than bare yt-dlp on PATH)
     output_template = str(output_dir / "video_%(autonumber)s.%(ext)s")
 
     cmd = [
-        "yt-dlp",
+        sys.executable, "-m", "yt_dlp",
         "--no-check-certificates",
         "-o", output_template,
         "--no-playlist",
@@ -251,14 +343,14 @@ def download_video_ytdlp(
     # Route through proxy if available
     if proxy_url:
         cmd.extend(["--proxy", proxy_url])
-        log.info("  Downloading video via yt-dlp (through SOCKS proxy)...")
+        log.info(f"  Downloading video via yt-dlp (through SOCKS proxy): {post_url[:80]}")
     else:
-        log.info("  Downloading video via yt-dlp...")
+        log.info(f"  Downloading video via yt-dlp: {post_url[:80]}")
 
     cmd.append(post_url)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
         if result.returncode == 0:
             # Find downloaded files from yt-dlp output
@@ -287,7 +379,7 @@ def download_video_ytdlp(
             return []
 
     except subprocess.TimeoutExpired:
-        log.warning("  yt-dlp timed out after 180s")
+        log.warning("  yt-dlp timed out after 300s")
         return []
     except FileNotFoundError:
         log.error("  yt-dlp not found. Install: pip install yt-dlp")
@@ -352,15 +444,28 @@ def download_attachments(
     if image_urls and (video_urls or any(p in post_url for p in ("/videos/", "/watch/", "/reel/"))):
         time.sleep(random.uniform(2.0, 6.0))
 
-    # Download videos — prefer yt-dlp on the post URL since it handles
-    # Facebook's video player better than direct URLs
-    is_video_post = any(p in post_url for p in ("/videos/", "/watch/", "/reel/"))
-    if is_video_post or video_urls:
-        result["videos"] = download_video_ytdlp(
-            post_url, attachments_dir,
+    # Download videos — two strategies:
+    # 1. Direct CDN downloads for fbcdn/akamai URLs (fast, reliable)
+    # 2. yt-dlp for Facebook page URLs (/videos/, /reel/, /watch/)
+    if video_urls:
+        result["videos"] = download_videos_direct(
+            video_urls, attachments_dir,
             proxy_url=proxy_url,
             download_proxy=download_proxy,
         )
+
+    # Try yt-dlp for page URLs that aren't direct CDN links
+    ytdlp_urls = _get_ytdlp_page_urls(video_urls, post_url)
+    if ytdlp_urls and not result["videos"]:
+        for yt_url in ytdlp_urls:
+            yt_result = download_video_ytdlp(
+                yt_url, attachments_dir,
+                proxy_url=proxy_url,
+                download_proxy=download_proxy,
+            )
+            if yt_result:
+                result["videos"].extend(yt_result)
+                break  # Got the video, stop trying
 
     total = len(result["images"]) + len(result["videos"])
     if total > 0:
