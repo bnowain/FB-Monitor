@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Pages - FB Monitor{% endblock %}
+{% block content %}
+<h1>Monitored Pages</h1>
+
+{% if page_stats %}
+<div class="pages-grid">
+    {% for page in page_stats %}
+    <a href="/pages/{{ page.page_name | urlencode }}" style="text-decoration: none; color: inherit;">
+        <div class="card page-card">
+            <div class="page-card-header">
+                <div class="page-avatar">{{ page.page_name[0] | upper }}</div>
+                <div class="page-card-info">
+                    <div class="page-card-name">{{ page.page_name }}</div>
+                    {% if page.page_url %}
+                    <div class="page-card-url">{{ page.page_url }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="page-card-stats">
+                <div class="page-stat">
+                    <span class="page-stat-num">{{ page.total_posts }}</span>
+                    <span class="page-stat-label">Posts</span>
+                </div>
+                <div class="page-stat">
+                    <span class="page-stat-num">{{ page.owner_posts }}</span>
+                    <span class="page-stat-label">Page Posts</span>
+                </div>
+                <div class="page-stat">
+                    <span class="page-stat-num">{{ page.community_posts }}</span>
+                    <span class="page-stat-label">Community</span>
+                </div>
+                <div class="page-stat">
+                    <span class="page-stat-num">{{ page.people_count }}</span>
+                    <span class="page-stat-label">People</span>
+                </div>
+                <div class="page-stat">
+                    <span class="page-stat-num">{{ page.entity_count }}</span>
+                    <span class="page-stat-label">Entities</span>
+                </div>
+            </div>
+            {% if page.latest_post_date %}
+            <div class="page-card-footer">
+                Latest activity: {{ page.latest_post_date[:16] }}
+            </div>
+            {% endif %}
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <p>No monitored pages found. Posts will appear here once scraped.</p>
+</div>
+{% endif %}
+
+<style>
+    .pages-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+        gap: 1rem;
+    }
+    .page-card { transition: border-color 0.15s; }
+    .page-card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+    }
+    .page-avatar {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.3rem;
+        font-weight: 700;
+        flex-shrink: 0;
+    }
+    .page-card-name {
+        font-weight: 600;
+        font-size: 1.05rem;
+    }
+    .page-card-url {
+        color: var(--text-dim);
+        font-size: 0.8rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .page-card-stats {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .page-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+    .page-stat-num {
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--accent);
+    }
+    .page-stat-label {
+        font-size: 0.72rem;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .page-card-footer {
+        margin-top: 0.75rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--text-dim);
+    }
+</style>
+{% endblock %}

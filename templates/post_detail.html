@@ -1,184 +1,415 @@
 {% extends "base.html" %}
 {% block title %}{{ post.page_name }} - Post{% endblock %}
 {% block content %}
-<div style="margin-bottom: 1rem;">
-    <a href="/posts" style="color: var(--text-dim); font-size: 0.85rem;">&larr; Back to posts</a>
-</div>
+<style>
+    .fb-post {
+        max-width: 680px;
+        margin: 0 auto;
+    }
+    .fb-post .back-link {
+        color: var(--text-dim);
+        font-size: 0.85rem;
+        margin-bottom: 1rem;
+        display: block;
+    }
 
-<div class="post-full">
+    /* Post header — author + timestamp */
+    .fb-post .post-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.75rem;
+    }
+    .fb-post .avatar {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 1.1rem;
+        flex-shrink: 0;
+    }
+    .fb-post .post-header .name {
+        font-weight: 600;
+        font-size: 1rem;
+    }
+    .fb-post .post-header .name a {
+        color: var(--text);
+    }
+    .fb-post .post-header .time {
+        color: var(--text-dim);
+        font-size: 0.82rem;
+    }
+
+    /* Shared from banner */
+    .fb-post .shared-banner {
+        color: var(--orange);
+        font-size: 0.9rem;
+        margin-bottom: 0.5rem;
+    }
+
+    /* Post body text */
+    .fb-post .post-text {
+        font-size: 1.05rem;
+        line-height: 1.65;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        margin-bottom: 1rem;
+    }
+
+    /* Full-width images */
+    .fb-post .post-images {
+        margin: 0 -1.25rem;
+    }
+    .fb-post .post-images img {
+        width: 100%;
+        display: block;
+        cursor: pointer;
+    }
+    .fb-post .post-images img + img {
+        margin-top: 2px;
+    }
+    .fb-post .post-images .video-placeholder {
+        background: var(--surface2);
+        padding: 2rem;
+        text-align: center;
+        font-size: 0.9rem;
+        color: var(--text-dim);
+    }
+    .fb-post .post-images .video-placeholder .icon {
+        font-size: 2.5rem;
+        margin-bottom: 0.5rem;
+    }
+
+    /* Links */
+    .fb-post .post-links {
+        margin: 0.75rem 0;
+    }
+    .fb-post .post-links a {
+        display: block;
+        margin: 0.2rem 0;
+        font-size: 0.9rem;
+        word-break: break-all;
+    }
+
+    /* Engagement bar */
+    .fb-post .engagement {
+        display: flex;
+        gap: 1.5rem;
+        padding: 0.6rem 0;
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+        margin: 0.5rem 0;
+        font-size: 0.85rem;
+        color: var(--text-dim);
+    }
+
+    /* Source link */
+    .fb-post .source-link {
+        font-size: 0.82rem;
+        color: var(--text-dim);
+        margin: 0.5rem 0;
+        word-break: break-all;
+    }
+    .fb-post .source-link a {
+        color: var(--text-dim);
+    }
+    .fb-post .source-link a:hover {
+        color: var(--accent);
+    }
+
+    /* Comments */
+    .fb-post .comments-section {
+        margin-top: 0.5rem;
+    }
+    .fb-post .comments-section h3 {
+        font-size: 0.9rem;
+        color: var(--text-dim);
+        font-weight: 400;
+        margin: 0.75rem 0 0.5rem;
+    }
+    .fb-comment {
+        display: flex;
+        gap: 0.6rem;
+        margin-bottom: 0.6rem;
+    }
+    .fb-comment .c-avatar {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--surface2);
+        color: var(--text-dim);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        font-size: 0.75rem;
+        flex-shrink: 0;
+    }
+    .fb-comment .c-bubble {
+        background: var(--surface2);
+        border-radius: 12px;
+        padding: 0.5rem 0.75rem;
+        max-width: 85%;
+    }
+    .fb-comment .c-author {
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+    .fb-comment .c-text {
+        font-size: 0.92rem;
+        line-height: 1.5;
+        margin-top: 0.1rem;
+    }
+    .fb-comment .c-time {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+        margin-top: 0.2rem;
+        padding-left: 0.75rem;
+    }
+    .fb-comment.reply {
+        margin-left: 2.5rem;
+    }
+    .fb-comment.reply .c-avatar {
+        width: 26px;
+        height: 26px;
+        font-size: 0.65rem;
+    }
+    .fb-no-comments {
+        color: var(--text-dim);
+        font-size: 0.9rem;
+        padding: 1.5rem;
+        text-align: center;
+    }
+
+    /* Admin tools — collapsed by default */
+    .admin-tools {
+        margin-top: 1.5rem;
+        border-top: 1px solid var(--border);
+        padding-top: 1rem;
+    }
+    .admin-tools summary {
+        cursor: pointer;
+        color: var(--text-dim);
+        font-size: 0.85rem;
+    }
+    .admin-tools summary:hover {
+        color: var(--text);
+    }
+    .admin-tools .tools-inner {
+        margin-top: 0.75rem;
+    }
+    .admin-tools .tool-section {
+        margin-bottom: 1rem;
+    }
+    .admin-tools .tool-label {
+        color: var(--text-dim);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 0.4rem;
+    }
+</style>
+
+<div class="fb-post">
+    <a href="/posts" class="back-link">&larr; Back to posts</a>
+
     <div class="card">
-        <div class="meta" style="display: flex; gap: 1rem; font-size: 0.85rem; color: var(--text-dim); margin-bottom: 0.75rem; flex-wrap: wrap;">
-            <span style="color: var(--accent); font-weight: 600;">{{ post.page_name }}</span>
-            {% if post.author %}<span>{{ post.author }}</span>{% endif %}
-            {% if post.timestamp %}<span>{{ post.timestamp }}</span>{% endif %}
-            <span>Captured: {{ post.detected_at[:19] }}</span>
+        <!-- Post Header -->
+        <div class="post-header">
+            <div class="avatar">{{ post.page_name[0] if post.page_name else '?' }}</div>
+            <div>
+                <div class="name">
+                    {% if post.page_url %}
+                    <a href="{{ post.page_url }}" target="_blank" rel="noopener">{{ post.page_name }}</a>
+                    {% else %}
+                    {{ post.page_name }}
+                    {% endif %}
+                </div>
+                <div class="time">
+                    {{ post.timestamp or '' }}
+                    {% if post.timestamp and post.detected_at %} &middot; {% endif %}
+                    Captured {{ post.detected_at[:16] }}
+                </div>
+            </div>
         </div>
 
         {% if post.shared_from %}
-        <div style="color: var(--orange); font-size: 0.9rem; margin-bottom: 0.5rem;">
+        <div class="shared-banner">
             Shared from {{ post.shared_from }}
             {% if post.shared_original_url %}
-            — <a href="{{ post.shared_original_url }}" target="_blank" rel="noopener">original</a>
+            &mdash; <a href="{{ post.shared_original_url }}" target="_blank" rel="noopener">view original</a>
             {% endif %}
         </div>
         {% endif %}
 
-        <div class="text-body">{{ post.text or "(no text captured)" }}</div>
-
-        {% if post.post_url %}
-        <div class="field-label">Source</div>
-        <a href="{{ post.post_url }}" target="_blank" rel="noopener">{{ post.post_url }}</a>
+        <!-- Post Text -->
+        {% if post.text %}
+        <div class="post-text">{{ post.text }}</div>
         {% endif %}
 
-        {% if links %}
-        <div class="field-label">Links in Post</div>
-        <div class="links-list">
-            {% for link in links %}
-            <a href="{{ link }}" target="_blank" rel="noopener">{{ link }}</a>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {% if post.reaction_count %}
-        <div class="field-label">Reactions</div>
-        <span>{{ post.reaction_count }}</span>
-        {% endif %}
-
-        <!-- Categories -->
-        <div class="field-label">Categories</div>
-        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
-            {% for cat in post_categories %}
-            <span style="display: inline-flex; align-items: center; gap: 0.3rem;">
-                <span class="badge" style="background: {{ cat.color }}22; color: {{ cat.color }};">{{ cat.name }}</span>
-                <form method="post" action="/posts/{{ post.post_id }}/untag-category" style="display: inline;">
-                    <input type="hidden" name="category_id" value="{{ cat.id }}">
-                    <button type="submit" style="background: none; border: none; color: var(--red); cursor: pointer; font-size: 0.7rem; padding: 0;">x</button>
-                </form>
-            </span>
-            {% endfor %}
-            <form method="post" action="/posts/{{ post.post_id }}/tag-category" style="display: inline-flex; gap: 0.3rem; align-items: center;">
-                <select name="category_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.25rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">
-                    <option value="">+ tag...</option>
-                    {% for cat in all_categories %}
-                    <option value="{{ cat.id }}">{{ cat.name }}</option>
-                    {% endfor %}
-                </select>
-                <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Add</button>
-            </form>
-        </div>
-    </div>
-
-    <!-- Linked People -->
-    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">
-        People ({{ linked_people|length }})
-    </h2>
-    <div class="card">
-        {% for p in linked_people %}
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid var(--border);">
-            <div>
-                <a href="/people/{{ p.id }}">{{ p.name }}</a>
-                <span style="color: var(--orange); font-size: 0.8rem; margin-left: 0.5rem;">[{{ p.role }}]</span>
-            </div>
-            <form method="post" action="/posts/{{ post.post_id }}/unlink-person" style="display: inline;">
-                <input type="hidden" name="person_id" value="{{ p.id }}">
-                <input type="hidden" name="role" value="{{ p.role }}">
-                <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
-            </form>
-        </div>
-        {% endfor %}
-
-        <form method="post" action="/posts/{{ post.post_id }}/link-person" style="display: flex; gap: 0.5rem; margin-top: 0.75rem; align-items: center;">
-            <select name="person_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
-                <option value="">Select person...</option>
-                {% for p in all_people %}
-                <option value="{{ p.id }}">{{ p.name }}</option>
-                {% endfor %}
-            </select>
-            <select name="role" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.85rem;">
-                <option value="author">Author</option>
-                <option value="tagged">Tagged</option>
-                <option value="mentioned">Mentioned</option>
-                <option value="replied_to">Replied to</option>
-                <option value="associated">Associated</option>
-            </select>
-            <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;">Link</button>
-        </form>
-    </div>
-
-    {% if attachments %}
-    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Attachments</h2>
-    <div class="attachments-grid">
-        {% for att in attachments %}
-        {% if att.type == 'image' %}
-        <a href="/attachment/{{ att.id }}" target="_blank">
-            <img src="/attachment/{{ att.id }}" alt="{{ att.filename }}" loading="lazy">
-        </a>
-        {% elif att.type == 'video' %}
-        <div class="card" style="text-align: center; padding: 2rem;">
-            <div style="font-size: 2rem;">&#127909;</div>
-            <div style="margin-top: 0.5rem;">
+        <!-- Images / Videos — full width -->
+        {% if attachments %}
+        <div class="post-images">
+            {% for att in attachments %}
+            {% if att.type == 'image' %}
+            <a href="/attachment/{{ att.id }}" target="_blank">
+                <img src="/attachment/{{ att.id }}" alt="{{ att.filename }}" loading="lazy">
+            </a>
+            {% elif att.type == 'video' %}
+            <div class="video-placeholder">
+                <div class="icon">&#127909;</div>
                 <a href="/attachment/{{ att.id }}">{{ att.filename }}</a>
             </div>
+            {% endif %}
+            {% endfor %}
         </div>
         {% endif %}
-        {% endfor %}
-    </div>
-    {% endif %}
 
-    {% if queued_media %}
-    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">Queued Media ({{ queued_media|length }})</h2>
-    <div class="card">
-        {% for item in queued_media %}
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
-            <div>
-                {% if item.type == 'image' %}&#128247;{% else %}&#127909;{% endif %}
-                <span style="font-size: 0.85rem;">{{ item.type }}</span>
-                <span style="color: var(--text-dim); font-size: 0.75rem; margin-left: 0.5rem;">
+        {% if queued_media %}
+        <div class="post-images">
+            {% for item in queued_media %}
+            <div class="video-placeholder">
+                <div class="icon">{% if item.type == 'image' %}&#128247;{% else %}&#127909;{% endif %}</div>
+                <span style="font-size: 0.85rem;">{{ item.type }} &mdash;
                     {% if item.status == 'pending' %}
-                    <span style="color: var(--orange);">pending</span>
+                    <span style="color: var(--orange);">pending download</span>
                     {% elif item.status == 'downloaded' %}
                     <span style="color: var(--green);">downloaded</span>
                     {% else %}
                     <span>skipped</span>
                     {% endif %}
                 </span>
-            </div>
-            <div style="display: flex; gap: 0.5rem;">
                 {% if item.status == 'pending' %}
-                <form method="post" action="/downloads/{{ item.id }}/download" style="display: inline;">
-                    <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Download</button>
-                </form>
-                <form method="post" action="/downloads/{{ item.id }}/skip" style="display: inline;">
-                    <button type="submit" style="background: none; color: var(--text-dim); border: 1px solid var(--border); padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Skip</button>
-                </form>
-                {% elif item.status == 'downloaded' and item.local_path %}
-                <span style="color: var(--green); font-size: 0.8rem;">{{ item.local_path | basename if item.local_path else 'saved' }}</span>
+                <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; justify-content: center;">
+                    <form method="post" action="/downloads/{{ item.id }}/download" style="display: inline;">
+                        <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Download</button>
+                    </form>
+                    <form method="post" action="/downloads/{{ item.id }}/skip" style="display: inline;">
+                        <button type="submit" style="background: none; color: var(--text-dim); border: 1px solid var(--border); padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Skip</button>
+                    </form>
+                </div>
                 {% endif %}
             </div>
+            {% endfor %}
         </div>
-        {% endfor %}
-    </div>
-    {% endif %}
+        {% endif %}
 
-    <h2 style="font-size: 1.1rem; margin-top: 1.5rem;">
-        Comments ({{ comments|length }})
-    </h2>
-
-    {% if comments %}
-    <div class="card">
-        {% for c in comments %}
-        <div class="comment" {% if c.is_reply %}style="margin-left: 1.5rem;"{% endif %}>
-            <span class="author">{{ c.author or "Unknown" }}</span>
-            {% if c.is_reply %}<span class="reply-marker">reply</span>{% endif %}
-            {% if c.timestamp %}<span class="ts"> &middot; {{ c.timestamp }}</span>{% endif %}
-            <div class="body">{{ c.text }}</div>
+        <!-- Links -->
+        {% if links %}
+        <div class="post-links">
+            {% for link in links %}
+            <a href="{{ link }}" target="_blank" rel="noopener">{{ link }}</a>
+            {% endfor %}
         </div>
-        {% endfor %}
+        {% endif %}
+
+        <!-- Engagement bar -->
+        <div class="engagement">
+            {% if post.reaction_count %}<span>{{ post.reaction_count }} reactions</span>{% endif %}
+            <span>{{ comments|length }} comment{{ 's' if comments|length != 1 else '' }}</span>
+            {% if post.share_count_text %}<span>{{ post.share_count_text }} shares</span>{% endif %}
+        </div>
+
+        <!-- Source -->
+        {% if post.post_url %}
+        <div class="source-link">
+            <a href="{{ post.post_url }}" target="_blank" rel="noopener">View on Facebook</a>
+        </div>
+        {% endif %}
+
+        <!-- Comments -->
+        <div class="comments-section">
+            {% if comments %}
+            {% for c in comments %}
+            <div class="fb-comment {{ 'reply' if c.is_reply else '' }}">
+                <div class="c-avatar">{{ (c.author or '?')[0] }}</div>
+                <div>
+                    <div class="c-bubble">
+                        <div class="c-author">{{ c.author or "Unknown" }}</div>
+                        <div class="c-text">{{ c.text }}</div>
+                    </div>
+                    {% if c.timestamp %}
+                    <div class="c-time">{{ c.timestamp }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="fb-no-comments">No comments captured.</div>
+            {% endif %}
+        </div>
+
+        <!-- Admin tools (categories, people, etc.) — collapsible -->
+        <div class="admin-tools">
+            <details>
+                <summary>Admin tools</summary>
+                <div class="tools-inner">
+                    <!-- Categories -->
+                    <div class="tool-section">
+                        <div class="tool-label">Categories</div>
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                            {% for cat in post_categories %}
+                            <span style="display: inline-flex; align-items: center; gap: 0.3rem;">
+                                <span class="badge" style="background: {{ cat.color }}22; color: {{ cat.color }};">{{ cat.name }}</span>
+                                <form method="post" action="/posts/{{ post.post_id }}/untag-category" style="display: inline;">
+                                    <input type="hidden" name="category_id" value="{{ cat.id }}">
+                                    <button type="submit" style="background: none; border: none; color: var(--red); cursor: pointer; font-size: 0.7rem; padding: 0;">x</button>
+                                </form>
+                            </span>
+                            {% endfor %}
+                            <form method="post" action="/posts/{{ post.post_id }}/tag-category" style="display: inline-flex; gap: 0.3rem; align-items: center;">
+                                <select name="category_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.25rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">
+                                    <option value="">+ tag...</option>
+                                    {% for cat in all_categories %}
+                                    <option value="{{ cat.id }}">{{ cat.name }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Add</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- People -->
+                    <div class="tool-section">
+                        <div class="tool-label">Linked People</div>
+                        {% for p in linked_people %}
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0;">
+                            <div>
+                                <a href="/people/{{ p.id }}">{{ p.name }}</a>
+                                <span style="color: var(--orange); font-size: 0.8rem; margin-left: 0.4rem;">[{{ p.role }}]</span>
+                            </div>
+                            <form method="post" action="/posts/{{ post.post_id }}/unlink-person" style="display: inline;">
+                                <input type="hidden" name="person_id" value="{{ p.id }}">
+                                <input type="hidden" name="role" value="{{ p.role }}">
+                                <button type="submit" style="background: none; color: var(--red); border: none; cursor: pointer; font-size: 0.8rem;">remove</button>
+                            </form>
+                        </div>
+                        {% endfor %}
+                        <form method="post" action="/posts/{{ post.post_id }}/link-person" style="display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center;">
+                            <select name="person_id" required style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.3rem 0.5rem; border-radius: 4px; font-size: 0.82rem;">
+                                <option value="">Select person...</option>
+                                {% for p in all_people %}
+                                <option value="{{ p.id }}">{{ p.name }}</option>
+                                {% endfor %}
+                            </select>
+                            <select name="role" style="background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.3rem 0.5rem; border-radius: 4px; font-size: 0.82rem;">
+                                <option value="author">Author</option>
+                                <option value="tagged">Tagged</option>
+                                <option value="mentioned">Mentioned</option>
+                                <option value="replied_to">Replied to</option>
+                                <option value="associated">Associated</option>
+                            </select>
+                            <button type="submit" style="background: var(--accent); color: white; border: none; padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.82rem;">Link</button>
+                        </form>
+                    </div>
+                </div>
+            </details>
+        </div>
     </div>
-    {% else %}
-    <div class="card" style="color: var(--text-dim); padding: 2rem; text-align: center;">
-        No comments captured yet.
-    </div>
-    {% endif %}
 </div>
 {% endblock %}

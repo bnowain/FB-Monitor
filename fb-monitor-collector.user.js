@@ -16,7 +16,7 @@
   'use strict';
 
   // --- Configuration ---
-  const API_URL = GM_getValue('api_url', 'http://localhost:8000/api/ingest');
+  const API_URL = GM_getValue('api_url', 'http://localhost:8150/api/ingest');
   const AUTO_EXPAND = GM_getValue('auto_expand', true);
   const EXPAND_DELAY_MS = 800;  // Delay between expand clicks
 
@@ -337,10 +337,13 @@
     if (textBlocks.length > 0) {
       text = Array.from(textBlocks).map(b => b.innerText).join('\n').trim();
     } else {
-      // Fallback: find the largest text block in the article
+      // Fallback: find the largest text block in the article, but EXCLUDE
+      // text that lives inside comment containers (ul[role="list"], aria-label*="comment")
       const allText = article.querySelectorAll('div[dir="auto"]');
       let longest = '';
       allText.forEach(el => {
+        // Skip if this element is inside a comment container
+        if (el.closest('ul[role="list"]') || el.closest('[aria-label*="comment" i]') || el.closest('[aria-label*="Comment" i]')) return;
         const t = el.innerText?.trim() || '';
         if (t.length > longest.length && t.length > 20) longest = t;
       });
@@ -410,7 +413,11 @@
     // --- Reactions / counts ---
     let reactionCount = '';
     const reactionEl = article.querySelector('[aria-label*="reaction"], [aria-label*="like"]');
-    if (reactionEl) reactionCount = reactionEl.getAttribute('aria-label') || '';
+    if (reactionEl) {
+      reactionCount = reactionEl.getAttribute('aria-label') || '';
+      // Reject non-numeric reaction text (e.g. "See who reacted to this")
+      if (reactionCount && !/^\d/.test(reactionCount.trim())) reactionCount = '';
+    }
 
     let commentCountText = '';
     let shareCountText = '';
@@ -491,6 +498,23 @@
       // Filter noise
       if (!text || text.length < 2) return;
       if (/^(Like|Reply|Share|Write a comment|Most relevant|Newest|All comments)$/i.test(text)) return;
+      const noiseExact = new Set([
+        'log in','forgot account?','forgot password?','sign up','create new account',
+        'not now','see more','no comments yet','be the first to comment',
+        'privacy','privacy policy','terms','terms of service','cookie policy',
+        'cookies','ad choices','about','help','contact','careers',
+        'meta','meta platforms, inc.','english (us)','english (uk)',
+        'español','français','deutsch','português (brasil)','italiano',
+      ]);
+      if (noiseExact.has(text.toLowerCase())) return;
+      const noisePatterns = [
+        /^\d+[hmdws]$/i, /^\d+\s*(hr|min|sec|hour|minute|day|week)s?\s*(ago)?$/i,
+        /^\d+\s+repl(y|ies)$/i, /^view\s+\d+\s+repl/i, /^most relevant/i,
+        /^meta\s*[©(]/i, /^see who reacted/i, /^\d+\s*(comment|share)s?$/i,
+        /^see more of/i, /^all reactions/i, /^\d+$/, /replied\s*$/i,
+        /^log in or sign up/i, /^sign up to see/i, /^privacy\s*·\s*terms/i,
+      ];
+      if (noisePatterns.some(p => p.test(text))) return;
 
       // Timestamp
       let ts = '';
@@ -678,7 +702,7 @@
   });
 
   document.getElementById('fbm-settings-btn').addEventListener('click', () => {
-    const newUrl = prompt('API URL:', GM_getValue('api_url', 'http://localhost:8000/api/ingest'));
+    const newUrl = prompt('API URL:', GM_getValue('api_url', 'http://localhost:8150/api/ingest'));
     if (newUrl) {
       GM_setValue('api_url', newUrl);
       alert('API URL updated. Reload the page for it to take effect.');

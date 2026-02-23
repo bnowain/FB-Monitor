@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% block title %}{{ page_name }} - FB Monitor{% endblock %}
+{% block content %}
+
+<!-- Page Header -->
+<div class="feed-header">
+    <div class="feed-header-top">
+        <div class="feed-avatar">{{ page_name[0] | upper }}</div>
+        <div class="feed-header-info">
+            <h1 class="feed-page-name">{{ page_name }}</h1>
+            <div class="feed-meta">
+                {% if page_url %}
+                <a href="{{ page_url }}" target="_blank" rel="noopener" class="feed-ext-link">{{ page_url }}</a>
+                {% endif %}
+                <span>{{ total_count }} post{{ "s" if total_count != 1 }}</span>
+                {% if linked_people %}
+                <span>{{ linked_people|length }} linked people</span>
+                {% endif %}
+                {% if linked_entities %}
+                <span>{{ linked_entities|length }} linked entities</span>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {% if linked_people or linked_entities %}
+    <div class="feed-links">
+        {% for person in linked_people %}
+        <a href="/people/{{ person.id }}" class="feed-link-chip">{{ person.name }} <span class="chip-role">{{ person.role }}</span></a>
+        {% endfor %}
+        {% for entity in linked_entities %}
+        <a href="/entities/{{ entity.id }}" class="feed-link-chip feed-link-entity">{{ entity.name }}</a>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Tab Bar -->
+<div class="feed-tabs">
+    <a href="/pages/{{ page_name | urlencode }}" class="feed-tab {% if filter == 'all' %}active{% endif %}">
+        All <span class="tab-count">{{ total_count }}</span>
+    </a>
+    <a href="/pages/{{ page_name | urlencode }}?filter=page" class="feed-tab {% if filter == 'page' %}active{% endif %}">
+        Page Posts <span class="tab-count">{{ owner_count }}</span>
+    </a>
+    <a href="/pages/{{ page_name | urlencode }}?filter=community" class="feed-tab {% if filter == 'community' %}active{% endif %}">
+        Community <span class="tab-count">{{ community_count }}</span>
+    </a>
+</div>
+
+<!-- Feed -->
+{% if posts %}
+<div class="feed">
+    {% for post in posts %}
+    <a href="/posts/{{ post.post_id | urlencode }}" style="text-decoration: none; color: inherit;">
+        <div class="card feed-card">
+            <div class="feed-card-header">
+                <div class="feed-card-avatar {% if post.author == page_name %}avatar-owner{% else %}avatar-community{% endif %}">{{ (post.author or '?')[0] | upper }}</div>
+                <div class="feed-card-author-info">
+                    <div class="feed-card-author">
+                        {{ post.author or 'Unknown' }}
+                        {% if post.author == page_name %}
+                        <span class="owner-badge">Page</span>
+                        {% endif %}
+                    </div>
+                    <div class="feed-card-time">{{ post.detected_at[:16] }}</div>
+                </div>
+            </div>
+
+            {% if post.shared_from %}
+            <div class="shared-from" style="margin-bottom: 0.5rem;">Shared from {{ post.shared_from }}</div>
+            {% endif %}
+
+            <div class="feed-card-body">
+                {{ post.text[:400] }}{% if post.text|length > 400 %}...{% endif %}
+            </div>
+
+            {% if post.first_image_id %}
+            <div class="feed-card-image">
+                <img src="/attachment/{{ post.first_image_id }}" alt="Post image" loading="lazy">
+            </div>
+            {% endif %}
+
+            <div class="feed-card-engagement">
+                {% if post.reaction_count %}
+                <span class="eng-item">{{ post.reaction_count }}</span>
+                {% endif %}
+                {% if post.comment_count %}
+                <span class="eng-item">{{ post.comment_count }} comment{{ "s" if post.comment_count != 1 }}</span>
+                {% endif %}
+                {% if post.attachment_counts.images %}
+                <span class="eng-item eng-images">{{ post.attachment_counts.images }} image{{ "s" if post.attachment_counts.images != 1 }}</span>
+                {% endif %}
+                {% if post.attachment_counts.videos %}
+                <span class="eng-item eng-videos">{{ post.attachment_counts.videos }} video{{ "s" if post.attachment_counts.videos != 1 }}</span>
+                {% endif %}
+                {% if post.share_count_text %}
+                <span class="eng-item">{{ post.share_count_text }}</span>
+                {% endif %}
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <p>No {% if filter == 'page' %}page owner{% elif filter == 'community' %}community{% endif %} posts found for {{ page_name }}.</p>
+</div>
+{% endif %}
+
+<style>
+    /* Page header */
+    .feed-header {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.5rem;
+        margin-bottom: 0;
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+    }
+    .feed-header-top {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    .feed-avatar {
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.6rem;
+        font-weight: 700;
+        flex-shrink: 0;
+    }
+    .feed-page-name {
+        margin: 0;
+        font-size: 1.4rem;
+    }
+    .feed-meta {
+        display: flex;
+        gap: 1rem;
+        color: var(--text-dim);
+        font-size: 0.85rem;
+        flex-wrap: wrap;
+        margin-top: 0.25rem;
+    }
+    .feed-ext-link {
+        color: var(--accent);
+        font-size: 0.85rem;
+    }
+    .feed-links {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 1rem;
+    }
+    .feed-link-chip {
+        display: inline-block;
+        padding: 0.2rem 0.6rem;
+        border-radius: 12px;
+        font-size: 0.78rem;
+        background: var(--surface2);
+        border: 1px solid var(--border);
+        color: var(--text);
+    }
+    .feed-link-chip:hover { border-color: var(--accent); text-decoration: none; }
+    .feed-link-entity { border-color: var(--green); }
+    .chip-role {
+        color: var(--text-dim);
+        font-size: 0.7rem;
+    }
+
+    /* Tabs */
+    .feed-tabs {
+        display: flex;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-top: none;
+        border-bottom-left-radius: 8px;
+        border-bottom-right-radius: 8px;
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+    }
+    .feed-tab {
+        flex: 1;
+        text-align: center;
+        padding: 0.75rem 1rem;
+        color: var(--text-dim);
+        font-size: 0.9rem;
+        font-weight: 500;
+        border-bottom: 3px solid transparent;
+        transition: all 0.15s;
+    }
+    .feed-tab:hover {
+        color: var(--text);
+        background: var(--surface2);
+        text-decoration: none;
+    }
+    .feed-tab.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+        font-weight: 600;
+    }
+    .tab-count {
+        font-size: 0.78rem;
+        color: var(--text-dim);
+        margin-left: 0.25rem;
+    }
+    .feed-tab.active .tab-count { color: var(--accent); }
+
+    /* Feed cards */
+    .feed { max-width: 680px; }
+    .feed-card { cursor: pointer; transition: border-color 0.15s; }
+    .feed-card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.75rem;
+    }
+    .feed-card-avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.95rem;
+        flex-shrink: 0;
+        color: white;
+    }
+    .avatar-owner { background: var(--accent); }
+    .avatar-community { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
+    .feed-card-author {
+        font-weight: 600;
+        font-size: 0.92rem;
+    }
+    .owner-badge {
+        display: inline-block;
+        padding: 0.05rem 0.4rem;
+        border-radius: 3px;
+        font-size: 0.68rem;
+        font-weight: 600;
+        background: var(--accent);
+        color: white;
+        margin-left: 0.35rem;
+        vertical-align: middle;
+    }
+    .feed-card-time {
+        font-size: 0.78rem;
+        color: var(--text-dim);
+    }
+    .feed-card-body {
+        line-height: 1.6;
+        white-space: pre-wrap;
+        margin-bottom: 0.75rem;
+        font-size: 0.95rem;
+    }
+    .feed-card-image {
+        margin-bottom: 0.75rem;
+        border-radius: 6px;
+        overflow: hidden;
+    }
+    .feed-card-image img {
+        width: 100%;
+        max-height: 400px;
+        object-fit: cover;
+        display: block;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+    }
+    .feed-card-engagement {
+        display: flex;
+        gap: 1rem;
+        padding-top: 0.6rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--text-dim);
+    }
+    .eng-images { color: #6db3f2; }
+    .eng-videos { color: #d48af2; }
+</style>
+{% endblock %}
