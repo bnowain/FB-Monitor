@@ -243,6 +243,8 @@ def _probe_tor_instances(config, url, pool, max_timeout=45):
     if len(healthy) < 2:
         return None
 
+    raceable = pool.get_raceable()
+
     winner = [None]  # mutable container for closure
     cancel_event = threading.Event()
     headless = config.get("headless", True)
@@ -272,7 +274,7 @@ def _probe_tor_instances(config, url, pool, max_timeout=45):
                     if is_login_wall(body):
                         duration = time.time() - start_time
                         if pool:
-                            pool.record_probe_result(instance, False, duration)
+                            pool.record_login_wall(instance)
                         log.debug(f"  Probe instance {instance.index}: login wall")
                         return None
 
@@ -294,10 +296,10 @@ def _probe_tor_instances(config, url, pool, max_timeout=45):
             log.debug(f"  Probe instance {instance.index} failed: {e}")
             return None
 
-    log.info(f"  Racing {len(healthy)} Tor instances for {url.split('/')[-1]}...")
+    log.info(f"  Racing {len(raceable)} Tor instances for {url.split('/')[-1]}...")
 
-    with ThreadPoolExecutor(max_workers=len(healthy)) as executor:
-        futures = {executor.submit(_probe, inst): inst for inst in healthy}
+    with ThreadPoolExecutor(max_workers=len(raceable)) as executor:
+        futures = {executor.submit(_probe, inst): inst for inst in raceable}
 
         for future in as_completed(futures, timeout=max_timeout):
             try:
@@ -329,6 +331,7 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
 
     # --- Phase 1: Race Tor pool instances (if available) ---
     winning_port = None
+    winner = None
     if tor_pool and using_tor and len(tor_pool.get_healthy()) >= 2:
         winner = _probe_tor_instances(config, url, tor_pool)
         if winner:
@@ -353,6 +356,8 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
                 body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
                 if is_login_wall(body):
                     log.info("  Racing winner hit login wall on full load, falling back")
+                    if tor_pool and winner:
+                        tor_pool.record_login_wall(winner)
                     _close_session_safe(context, browser, True)
                     winning_port = None
                 else:
@@ -366,10 +371,66 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
             log.warning(f"  Racing winner failed on full load: {e}")
             winning_port = None
 
-    # --- Phase 2: Sequential retries (fallback or no pool) ---
-    if tor_pool and using_tor:
-        log.info("  Falling back to sequential retries on main Tor instance")
+    # --- Phase 2: Cycle pool instances (if available) ---
+    pool_instances = tor_pool.get_raceable() if (tor_pool and using_tor) else []
+    if pool_instances:
+        pool_size = len(pool_instances)
+        log.info(f"  Falling back to cycling {pool_size} pool instances")
 
+        for attempt in range(1, max_retries + 1):
+            inst = pool_instances[(attempt - 1) % pool_size]
+
+            # Second pass through the pool: NEWNYM first for a fresh exit
+            if attempt > pool_size:
+                log.info(f"  Attempt {attempt}/{max_retries}: NEWNYM on instance {inst.index}")
+                tor_pool.renew_circuit(inst)
+                time.sleep(12)
+
+            rate_limiter.wait_if_needed(rotation_callback=tor_rotate)
+
+            proxy = get_tor_proxy_for_port(inst.socks_port)
+            try:
+                browser = pw.chromium.launch(
+                    headless=config.get("headless", True), proxy=proxy
+                )
+                context = create_stealth_context(browser, config, proxy_override=proxy)
+                page = context.new_page()
+
+                stealth_goto(page, url)
+                _dismiss_dialogs(page)
+                rate_limiter.record()
+            except PlaywrightTimeout:
+                log.warning(f"  Attempt {attempt}/{max_retries}: timeout on instance {inst.index}")
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                continue
+            except Exception as e:
+                log.warning(f"  Attempt {attempt}/{max_retries}: error on instance {inst.index}: {e}")
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                continue
+
+            # Check for login wall
+            try:
+                body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
+                if is_login_wall(body):
+                    log.info(f"  Attempt {attempt}/{max_retries}: login wall on instance {inst.index}")
+                    tor_pool.record_login_wall(inst)
+                    _close_session_safe(context, browser, True)
+                    continue
+            except Exception:
+                pass
+
+            log.info(f"  Feed page loaded via pool instance {inst.index} (attempt {attempt})")
+            return page, context, browser, True
+
+        log.info("  Pool cycling exhausted, falling back to main Tor")
+
+    # --- Phase 3: Sequential retries on main Tor (last resort or no pool) ---
     for attempt in range(1, max_retries + 1):
         rate_limiter.wait_if_needed(rotation_callback=tor_rotate)
 

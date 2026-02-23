@@ -14,8 +14,10 @@ Usage:
     pool.start()
     ready = pool.wait_ready(timeout=120)
     healthy = pool.get_healthy()
+    raceable = pool.get_raceable(cooldown=300)
     pool.renew_circuit(instance)
     pool.record_probe_result(instance, success, duration)
+    pool.record_login_wall(instance)
     pool.stop()
 """
 
@@ -63,6 +65,7 @@ class TorInstance:
     probe_successes: int = 0
     probe_failures: int = 0
     last_probe_time: float = 0.0       # duration of last successful probe (seconds)
+    last_login_wall_at: float = 0.0    # epoch when last login-walled
     _last_control_ok: float = field(default_factory=time.time)
 
 
@@ -303,6 +306,31 @@ class TorPool:
         """Return list of instances in READY state."""
         return [i for i in self.instances if i.state == InstanceState.READY]
 
+    def get_raceable(self, cooldown: int = 300) -> list[TorInstance]:
+        """Return READY instances not in login wall cooldown.
+
+        Falls back to get_healthy() if all are in cooldown — better to
+        retry than skip entirely.
+        """
+        now = time.time()
+        raceable = [
+            i for i in self.instances
+            if i.state == InstanceState.READY
+            and (now - i.last_login_wall_at) > cooldown
+        ]
+        return raceable if raceable else self.get_healthy()
+
+    def record_login_wall(self, instance: TorInstance):
+        """Record a login wall hit: set cooldown and fire background NEWNYM."""
+        instance.last_login_wall_at = time.time()
+        instance.probe_failures += 1
+        log.info(f"  Login wall on instance {instance.index} — "
+                 f"cooldown 5min, NEWNYM in background")
+        threading.Thread(
+            target=self.renew_circuit, args=(instance,),
+            daemon=True, name=f"newnym-{instance.index}",
+        ).start()
+
     def renew_circuit(self, instance: TorInstance) -> bool:
         """Send SIGNAL NEWNYM to a specific instance's control port."""
         try:
@@ -476,6 +504,7 @@ class TorPool:
         state_counts = {}
         total_restarts = 0
         probe_parts = []
+        now = time.time()
 
         for inst in self.instances:
             state_counts[inst.state.value] = state_counts.get(inst.state.value, 0) + 1
@@ -484,8 +513,12 @@ class TorPool:
             total_probes = inst.probe_successes + inst.probe_failures
             if total_probes > 0:
                 pct = int(100 * inst.probe_successes / total_probes)
+                lw = ""
+                if inst.last_login_wall_at > 0:
+                    ago = int(now - inst.last_login_wall_at)
+                    lw = f" LW:{ago}s ago"
                 probe_parts.append(
-                    f"#{inst.index}={inst.probe_successes}/{total_probes} ({pct}%)"
+                    f"#{inst.index}={inst.probe_successes}/{total_probes} ({pct}%){lw}"
                 )
             else:
                 probe_parts.append(f"#{inst.index}=no probes")

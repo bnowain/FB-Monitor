@@ -4,6 +4,36 @@
       "name": "Vote Kevin Crye",
       "url": "https://www.facebook.com/votekevincrye",
       "enabled": true
+    },
+    {
+      "name": "Shasta County Government",
+      "url": "https://www.facebook.com/ShastaCountyGov",
+      "enabled": true
+    },
+    {
+      "name": "Shasta County Clerk / Registrar of Voters",
+      "url": "https://www.facebook.com/IClerkUVote",
+      "enabled": true
+    },
+    {
+      "name": "Clint Curtis for County Clerk 2026",
+      "url": "https://www.facebook.com/profile.php?id=61577686793164",
+      "enabled": true
+    },
+    {
+      "name": "Redding Police Department",
+      "url": "https://www.facebook.com/ReddingPolice",
+      "enabled": true
+    },
+    {
+      "name": "Anderson Police Department",
+      "url": "https://www.facebook.com/AndersonPoliceDept",
+      "enabled": true
+    },
+    {
+      "name": "Shasta County District Attorney",
+      "url": "https://www.facebook.com/ShastaDA",
+      "enabled": true
     }
   ],
   "default_account": "anonymous",
