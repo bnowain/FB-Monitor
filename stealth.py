@@ -20,27 +20,42 @@ log = logging.getLogger("fb-monitor")
 
 
 # ---------------------------------------------------------------------------
-# User agent rotation
+# User agent / fingerprint rotation
 # ---------------------------------------------------------------------------
 
-USER_AGENTS = [
+# Each entry is a coherent identity: UA string, platform, vendor, and browser type.
+# Platform must match the UA — a Mac UA with Win32 platform is a dead giveaway.
+BROWSER_PROFILES = [
     # Chrome on Windows
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+     "platform": "Win32", "vendor": "Google Inc.", "browser": "chrome"},
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+     "platform": "Win32", "vendor": "Google Inc.", "browser": "chrome"},
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+     "platform": "Win32", "vendor": "Google Inc.", "browser": "chrome"},
     # Chrome on Mac
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+     "platform": "MacIntel", "vendor": "Google Inc.", "browser": "chrome"},
+    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+     "platform": "MacIntel", "vendor": "Google Inc.", "browser": "chrome"},
     # Firefox on Windows
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+     "platform": "Win32", "vendor": "", "browser": "firefox"},
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+     "platform": "Win32", "vendor": "", "browser": "firefox"},
     # Firefox on Mac
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
-    # Edge
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
-    # Safari
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
+     "platform": "MacIntel", "vendor": "", "browser": "firefox"},
+    # Edge on Windows
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+     "platform": "Win32", "vendor": "Google Inc.", "browser": "chrome"},
+    # Safari on Mac
+    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+     "platform": "MacIntel", "vendor": "Apple Computer, Inc.", "browser": "safari"},
 ]
+
+# Backward compat — flat list of UA strings used by sessions.py
+USER_AGENTS = [p["ua"] for p in BROWSER_PROFILES]
 
 # Viewport sizes that match real browser windows
 VIEWPORT_SIZES = [
@@ -51,6 +66,22 @@ VIEWPORT_SIZES = [
     {"width": 1280, "height": 800},
     {"width": 1280, "height": 720},
 ]
+
+# Common WebGL renderer strings to spoof (avoids leaking real GPU)
+WEBGL_RENDERERS = [
+    {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.5)"},
+    {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics, OpenGL 4.5)"},
+    {"vendor": "Google Inc. (NVIDIA)", "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB, OpenGL 4.5)"},
+    {"vendor": "Google Inc. (NVIDIA)", "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060, OpenGL 4.5)"},
+    {"vendor": "Google Inc. (AMD)", "renderer": "ANGLE (AMD, AMD Radeon RX 580, OpenGL 4.5)"},
+    {"vendor": "Google Inc. (AMD)", "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics, OpenGL 4.5)"},
+    {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) HD Graphics 620, OpenGL 4.5)"},
+]
+
+
+def random_browser_profile() -> dict:
+    """Return a coherent browser identity (UA + platform + vendor + browser type)."""
+    return random.choice(BROWSER_PROFILES)
 
 
 def random_user_agent() -> str:
@@ -217,6 +248,11 @@ def get_tor_proxy(config: dict) -> dict | None:
     return {"server": f"socks5://127.0.0.1:{port}"}
 
 
+def get_tor_proxy_for_port(socks_port: int) -> dict:
+    """Return Playwright proxy dict for a specific SOCKS port."""
+    return {"server": f"socks5://127.0.0.1:{socks_port}"}
+
+
 def renew_tor_circuit(config: dict) -> bool:
     """
     Request a new Tor circuit via the control port (SIGNAL NEWNYM).
@@ -272,60 +308,156 @@ def renew_tor_circuit(config: dict) -> bool:
         return False
 
 
-def create_stealth_context(browser, config: dict):
+_SENTINEL = object()  # distinguishes "not provided" from None
+
+
+def create_stealth_context(browser, config: dict, proxy_override=_SENTINEL):
     """
-    Create a browser context with randomized fingerprint.
-    Each cycle gets a fresh context with different characteristics.
+    Create a browser context with a fully coherent randomized fingerprint.
+
+    Each session gets a consistent identity: UA, platform, vendor, viewport,
+    screen size, WebGL renderer, canvas noise, timezone, and locale all match
+    so nothing looks contradictory to fingerprinting scripts.
+
+    proxy_override: if provided, uses this proxy dict instead of reading from
+    config. Pass None to explicitly disable proxy, or a dict like
+    {"server": "socks5://127.0.0.1:9060"} to use a specific port.
+    Omit (default sentinel) to read from config as before.
     """
-    ua = random_user_agent()
+    profile = random_browser_profile()
     viewport = random_viewport()
+    webgl = random.choice(WEBGL_RENDERERS)
+
+    # Screen size should be >= viewport (as if browser isn't maximized)
+    screen_w = viewport["width"] + random.choice([0, 0, 80, 160])
+    screen_h = viewport["height"] + random.choice([0, 0, 40, 80])
 
     # Randomize locale slightly
     locales = ["en-US", "en-US", "en-US", "en-GB", "en-CA"]  # weighted toward en-US
 
     ctx_kwargs = dict(
-        user_agent=ua,
+        user_agent=profile["ua"],
         viewport=viewport,
         locale=random.choice(locales),
         timezone_id=random.choice([
             "America/Los_Angeles", "America/Denver",
             "America/Chicago", "America/New_York",
         ]),
+        # Device scale factor — varies by display
+        device_scale_factor=random.choice([1, 1, 1, 1.25, 1.5, 2]),
+        color_scheme=random.choice(["light", "light", "light", "dark"]),
     )
 
-    proxy = get_tor_proxy(config)
+    if proxy_override is not _SENTINEL:
+        proxy = proxy_override
+    else:
+        proxy = get_tor_proxy(config)
     if proxy:
         ctx_kwargs["proxy"] = proxy
 
     context = browser.new_context(**ctx_kwargs)
 
-    # Add some stealth JavaScript to mask automation
-    context.add_init_script("""
-        // Override navigator.webdriver
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    # Build stealth script tailored to this session's identity
+    is_chrome = profile["browser"] in ("chrome", "safari")
+    platform = profile["platform"]
+    vendor = profile["vendor"]
 
-        // Override chrome.runtime to look like a real browser
-        window.chrome = { runtime: {} };
+    context.add_init_script(f"""
+        // --- Core: hide automation ---
+        Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
 
-        // Override permissions query
+        // --- Platform: must match UA string ---
+        Object.defineProperty(navigator, 'platform', {{ get: () => '{platform}' }});
+        Object.defineProperty(navigator, 'vendor', {{ get: () => '{vendor}' }});
+
+        // --- Chrome object: only present in Chrome/Edge/Safari ---
+        {'window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };' if is_chrome else 'delete window.chrome;'}
+
+        // --- Permissions ---
         const originalQuery = window.navigator.permissions.query;
         window.navigator.permissions.query = (parameters) =>
             parameters.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
+                ? Promise.resolve({{ state: Notification.permission }})
                 : originalQuery(parameters);
 
-        // Override plugins to look non-empty
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
+        // --- Plugins: Chrome has plugins, Firefox doesn't ---
+        Object.defineProperty(navigator, 'plugins', {{
+            get: () => {'[1, 2, 3, 4, 5]' if is_chrome else '[]'},
+        }});
 
-        // Override languages
-        Object.defineProperty(navigator, 'languages', {
+        // --- Languages ---
+        Object.defineProperty(navigator, 'languages', {{
             get: () => ['en-US', 'en'],
-        });
+        }});
+
+        // --- Hardware concurrency: randomize CPU core count ---
+        Object.defineProperty(navigator, 'hardwareConcurrency', {{
+            get: () => {random.choice([4, 8, 8, 12, 16])},
+        }});
+
+        // --- Device memory (Chrome only, in GB) ---
+        Object.defineProperty(navigator, 'deviceMemory', {{
+            get: () => {random.choice([4, 8, 8, 16])},
+        }});
+
+        // --- Screen dimensions: must be >= viewport ---
+        Object.defineProperty(screen, 'width', {{ get: () => {screen_w} }});
+        Object.defineProperty(screen, 'height', {{ get: () => {screen_h} }});
+        Object.defineProperty(screen, 'availWidth', {{ get: () => {screen_w} }});
+        Object.defineProperty(screen, 'availHeight', {{ get: () => {screen_h - random.randint(30, 50)} }});
+        Object.defineProperty(screen, 'colorDepth', {{ get: () => 24 }});
+        Object.defineProperty(screen, 'pixelDepth', {{ get: () => 24 }});
+
+        // --- WebGL fingerprint: spoof renderer to avoid leaking real GPU ---
+        const getParameterOrig = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {{
+            const UNMASKED_VENDOR = 0x9245;
+            const UNMASKED_RENDERER = 0x9246;
+            if (param === UNMASKED_VENDOR) return '{webgl["vendor"]}';
+            if (param === UNMASKED_RENDERER) return '{webgl["renderer"]}';
+            return getParameterOrig.call(this, param);
+        }};
+        if (typeof WebGL2RenderingContext !== 'undefined') {{
+            const getParam2Orig = WebGL2RenderingContext.prototype.getParameter;
+            WebGL2RenderingContext.prototype.getParameter = function(param) {{
+                const UNMASKED_VENDOR = 0x9245;
+                const UNMASKED_RENDERER = 0x9246;
+                if (param === UNMASKED_VENDOR) return '{webgl["vendor"]}';
+                if (param === UNMASKED_RENDERER) return '{webgl["renderer"]}';
+                return getParam2Orig.call(this, param);
+            }};
+        }}
+
+        // --- Canvas fingerprint: add subtle noise so hash differs per session ---
+        const _toDataURL = HTMLCanvasElement.prototype.toDataURL;
+        const _toBlob = HTMLCanvasElement.prototype.toBlob;
+        const _getImageData = CanvasRenderingContext2D.prototype.getImageData;
+
+        // Per-session noise seed (consistent within one page load)
+        const _noiseSeed = {random.randint(1, 2**31)};
+        function _noiseHash(x) {{
+            x = ((x >> 16) ^ x) * 0x45d9f3b;
+            x = ((x >> 16) ^ x) * 0x45d9f3b;
+            x = (x >> 16) ^ x;
+            return x;
+        }}
+
+        CanvasRenderingContext2D.prototype.getImageData = function(sx, sy, sw, sh) {{
+            const imageData = _getImageData.call(this, sx, sy, sw, sh);
+            // Only add noise to small reads (fingerprinting), not large captures
+            if (sw * sh < 500 * 500) {{
+                for (let i = 0; i < imageData.data.length; i += 4) {{
+                    const noise = (_noiseHash(_noiseSeed + i) % 3) - 1;  // -1, 0, or 1
+                    imageData.data[i] = Math.max(0, Math.min(255, imageData.data[i] + noise));
+                }}
+            }}
+            return imageData;
+        }};
     """)
 
-    log.debug(f"Browser context: {ua[:50]}... viewport={viewport['width']}x{viewport['height']}")
+    log.debug(f"Stealth context: {profile['ua'][:40]}... "
+              f"platform={platform} viewport={viewport['width']}x{viewport['height']} "
+              f"gpu={webgl['renderer'][:30]}...")
 
     return context
 
