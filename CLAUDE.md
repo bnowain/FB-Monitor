@@ -109,12 +109,26 @@ This project is part of a hub-and-spoke civic accountability research platform.
 - **Shasta-Campaign-Finance** — campaign finance disclosures from NetFile
 - **Facebook-Monitor** — public Facebook page monitoring (this project)
 
-## Master Schema Reference
+## Master Schema & Codex References
 
-**`E:\0-Automated-Apps\MASTER_SCHEMA.md`** contains the canonical cross-project
-database schema. If you add, remove, or modify any database tables or fields in
-this project, **you must update the Master Schema** to keep it in sync. The agent
-is authorized and encouraged to edit that file directly.
+**`E:\0-Automated-Apps\MASTER_SCHEMA.md`** — Canonical cross-project database
+schema and API contracts. **HARD RULE: If you add, remove, or modify any database
+tables, columns, API endpoints, or response shapes, you MUST update the Master
+Schema before finishing your task.** Do not skip this — other projects read it to
+understand this project's data contracts.
 
 **`E:\0-Automated-Apps\MASTER_PROJECT.md`** describes the overall ecosystem
 architecture and how all projects interconnect.
+
+> **HARD RULE — READ AND UPDATE THE CODEX**
+>
+> **`E:\0-Automated-Apps\master_codex.md`** is the living interoperability codex.
+> 1. **READ it** at the start of any session that touches APIs, schemas, tools,
+>    chunking, person models, search, or integration with other projects.
+> 2. **UPDATE it** before finishing any task that changes cross-project behavior.
+>    This includes: new/changed API endpoints, database schema changes, new tools
+>    or tool modifications in Atlas, chunking strategy changes, person model changes,
+>    new cross-spoke dependencies, or completing items from a project's outstanding work list.
+> 3. **DO NOT skip this.** The codex is how projects stay in sync. If you change
+>    something that another project depends on and don't update the codex, the next
+>    agent working on that project will build on stale assumptions and break things.
