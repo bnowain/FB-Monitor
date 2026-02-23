@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from sanitize import sanitize_post as _sanitize_post
+
 log = logging.getLogger("fb-monitor")
 
 
@@ -95,13 +97,16 @@ def _parse_structured(page) -> PostData:
             if (textBlocks.length > 0) {
                 out.text = Array.from(textBlocks).map(el => el.innerText.trim()).join('\\n');
             } else {
-                // Broader fallback: find the largest text block in an article
+                // Broader fallback: find the largest text block in an article,
+                // but EXCLUDE text from comment containers
                 const articles = document.querySelectorAll('[role="article"]');
                 if (articles.length > 0) {
                     const article = articles[0];
                     const allText = article.querySelectorAll('div[dir="auto"]');
                     let longest = '';
                     allText.forEach(el => {
+                        // Skip if inside a comment container
+                        if (el.closest('ul[role="list"]') || el.closest('[aria-label*="comment" i]') || el.closest('[aria-label*="Comment" i]')) return;
                         const t = el.innerText.trim();
                         if (t.length > longest.length && t.length > 20) {
                             longest = t;
@@ -400,5 +405,17 @@ def parse_post(page, browser_context=None, post_url: str = "", post_id: str = ""
 
     log.info(f"  Parsed post: {len(data.text)} chars, {len(data.image_urls)} images, "
              f"{len(data.video_urls)} videos, shared_from='{data.shared_from}'")
+
+    # Sanitize: reject login walls, strip chrome, clean reactions/timestamps
+    post_dict = data.to_dict()
+    cleaned = _sanitize_post(post_dict, page_name)
+    if cleaned is None:
+        log.info(f"  Rejected: login wall page")
+        return None
+
+    # Apply cleaned fields back to PostData
+    data.text = cleaned.get("text", data.text)
+    data.reaction_count = cleaned.get("reaction_count", data.reaction_count)
+    data.timestamp = cleaned.get("timestamp", data.timestamp)
 
     return data

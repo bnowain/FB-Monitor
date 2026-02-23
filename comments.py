@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from sanitize import is_garbage_comment
+
 log = logging.getLogger("fb-monitor")
 
 
@@ -73,11 +75,10 @@ def _strategy_aria(page) -> list[Comment]:
         )
         for item in results:
             text = item.get("text", "").strip()
-            if text and len(text) >= 2 and text not in (
-                "Like", "Reply", "Share", "Write a comment…", "Most relevant"
-            ):
+            author = item.get("author", "Unknown")
+            if text and len(text) >= 2 and not is_garbage_comment(author, text):
                 comments.append(Comment(
-                    author=item.get("author", "Unknown"),
+                    author=author,
                     text=text[:2000],
                     timestamp=item.get("timestamp", ""),
                     is_reply=item.get("isReply", False),
@@ -129,9 +130,10 @@ def _strategy_mobile(page, browser_context, post_url: str) -> list[Comment]:
 
         for item in results:
             text = item.get("text", "").strip()
-            if text and len(text) >= 2:
+            author = item.get("author", "Unknown")
+            if text and len(text) >= 2 and not is_garbage_comment(author, text):
                 comments.append(Comment(
-                    author=item.get("author", "Unknown"),
+                    author=author,
                     text=text[:2000],
                     strategy="mobile",
                 ))
@@ -149,12 +151,47 @@ def _strategy_text_blocks(page) -> list[Comment]:
             'div[dir="auto"], span[dir="auto"]',
             """elements => {
                 const seen = new Set();
+                const noise = new Set([
+                    'Like','Reply','Share','Comment','Write a comment',
+                    'Write a comment…','Most relevant','All comments','Newest',
+                    'Log In','Log in','Sign Up','Sign up','Create new account',
+                    'Create New Account','Forgot Account?','Forgot account?',
+                    'Forgot password?','Not now','See more','See More',
+                    'No comments yet','No comments yet.','Be the first to comment.',
+                    'Be the first to comment',
+                    'Privacy','Privacy Policy','Terms','Terms of Service',
+                    'Cookie Policy','Cookies','Ad Choices','About','Help',
+                    'Contact','Careers','Meta','Meta Platforms, Inc.',
+                    'English (US)','English (UK)','Español','Français',
+                    'Deutsch','Português (Brasil)','Italiano',
+                ]);
+                const noisePatterns = [
+                    /^Log in or sign up/i,
+                    /^Sign up to see/i,
+                    /^Create an account/i,
+                    /^Join Facebook/i,
+                    /^See more of/i,
+                    /^All reactions/i,
+                    /^\d+$/,
+                    /^Most relevant/i,
+                    /^Meta\s*[©(]/i,
+                    /^See who reacted/i,
+                    /^\d+\s*(comment|share)s?$/i,
+                    /^\d+[hmdws]$/i,
+                    /^\d+\s*(hr|min|sec|hour|minute|day|week)s?\s*(ago)?$/i,
+                    /replied\s*$/i,
+                    /^privacy\s*·\s*terms/i,
+                ];
                 return elements.filter(el => {
                     const text = el.innerText.trim();
                     if (text.length < 5 || text.length > 2000 || seen.has(text)) return false;
                     seen.add(text);
-                    if (['Like','Reply','Share','Comment','Write a comment',
-                         'Most relevant','All comments','Newest'].includes(text)) return false;
+                    if (noise.has(text)) return false;
+                    if (noisePatterns.some(p => p.test(text))) return false;
+                    // Skip elements inside the main post content (not inside comment containers)
+                    const inComment = el.closest('[aria-label*="comment" i]')
+                        || el.closest('ul[role="list"]');
+                    if (!inComment) return false;
                     return true;
                 }).map(el => {
                     let parent = el.parentElement;
@@ -173,9 +210,10 @@ def _strategy_text_blocks(page) -> list[Comment]:
         )
         for item in results:
             text = item.get("text", "")
-            if len(text) >= 10:
+            author = item.get("author", "")
+            if len(text) >= 10 and not is_garbage_comment(author, text):
                 comments.append(Comment(
-                    author=item.get("author", ""),
+                    author=author,
                     text=text[:2000],
                     strategy="text_blocks",
                 ))
