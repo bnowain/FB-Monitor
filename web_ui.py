@@ -5,7 +5,7 @@ web_ui.py — FastAPI web interface for FB-Monitor.
 Browse captured posts, comments, and attachments.
 
 Usage:
-    python web_ui.py                    # Start on port 8000
+    python web_ui.py                    # Start on port 8150
     python web_ui.py --port 9000        # Custom port
     python web_ui.py --host 0.0.0.0     # Listen on all interfaces
 """
@@ -29,6 +29,7 @@ import base64
 
 import database as db
 from downloader import download_images, download_video_ytdlp
+from sanitize import sanitize_post, sanitize_comments
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -48,6 +49,79 @@ async def dashboard(request: Request):
         "request": request,
         "stats": stats,
         "active_page": "dashboard",
+    })
+
+
+@app.get("/pages", response_class=HTMLResponse)
+async def pages_list(request: Request):
+    page_stats = db.get_page_stats()
+    return templates.TemplateResponse("pages.html", {
+        "request": request,
+        "page_stats": page_stats,
+        "active_page": "pages",
+    })
+
+
+@app.get("/pages/{page_name}", response_class=HTMLResponse)
+async def page_feed(
+    request: Request,
+    page_name: str,
+    filter: str = Query("all"),
+):
+    if filter not in ("all", "page", "community"):
+        filter = "all"
+
+    posts = db.get_posts(page_name=page_name, limit=100)
+
+    # Apply owner/community filter
+    if filter == "page":
+        posts = [p for p in posts if p.get("author") == page_name]
+    elif filter == "community":
+        posts = [p for p in posts if p.get("author") != page_name]
+
+    # Enrich posts with attachment counts, comment count, first image
+    conn = db.get_connection()
+    for post in posts:
+        pid = post["post_id"]
+        img_count = conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE post_id=? AND type='image'", (pid,)
+        ).fetchone()[0]
+        vid_count = conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE post_id=? AND type='video'", (pid,)
+        ).fetchone()[0]
+        comment_count = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE post_id=?", (pid,)
+        ).fetchone()[0]
+        first_image = conn.execute(
+            "SELECT id FROM attachments WHERE post_id=? AND type='image' ORDER BY id LIMIT 1", (pid,)
+        ).fetchone()
+        post["attachment_counts"] = {"images": img_count, "videos": vid_count}
+        post["comment_count"] = comment_count
+        post["first_image_id"] = first_image[0] if first_image else None
+    conn.close()
+
+    # Page metadata
+    page_url = posts[0]["page_url"] if posts else ""
+    linked_people = db.get_people_for_page(page_name)
+    linked_entities = db.get_entities_for_page(page_name)
+
+    # Counts for tabs
+    all_posts = db.get_posts(page_name=page_name, limit=1000)
+    owner_count = sum(1 for p in all_posts if p.get("author") == page_name)
+    community_count = len(all_posts) - owner_count
+
+    return templates.TemplateResponse("page_feed.html", {
+        "request": request,
+        "page_name": page_name,
+        "page_url": page_url,
+        "posts": posts,
+        "filter": filter,
+        "total_count": len(all_posts),
+        "owner_count": owner_count,
+        "community_count": community_count,
+        "linked_people": linked_people,
+        "linked_entities": linked_entities,
+        "active_page": "pages",
     })
 
 
@@ -800,6 +874,50 @@ async def serve_attachment(attachment_id: int):
 # JSON API
 # ---------------------------------------------------------------------------
 
+@app.get("/api/health")
+async def api_health():
+    """Health check endpoint for Atlas spoke polling."""
+    return {"status": "ok"}
+
+
+@app.get("/api/posts/search")
+async def api_posts_search(
+    q: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Search posts with inlined comments — Atlas spoke endpoint."""
+    posts = db.get_posts(search=q, limit=limit)
+    results = []
+    for post in posts:
+        pid = post["post_id"]
+        # Build combined text: post body + all comments
+        parts = []
+        if post.get("text"):
+            parts.append(post["text"])
+        comments = db.get_comments_for_post(pid)
+        for c in comments:
+            author = c.get("author", "")
+            text = c.get("text", "")
+            if text:
+                prefix = f"{author}: " if author else ""
+                parts.append(prefix + text)
+        # Use stored post_url, or construct one from page_url + post_id
+        post_url = post.get("post_url", "")
+        if not post_url:
+            page_url = post.get("page_url", "")
+            if page_url:
+                post_url = f"{page_url.rstrip('/')}/posts/{pid}"
+        results.append({
+            "id": pid,
+            "text": "\n\n".join(parts),
+            "page_name": post.get("page_name", ""),
+            "author": post.get("author", ""),
+            "date": post.get("detected_at", ""),
+            "post_url": post_url,
+        })
+    return results
+
+
 @app.get("/api/stats")
 async def api_stats():
     return db.get_stats()
@@ -867,10 +985,10 @@ async def api_import_urls(request: Request, page_name: str = Query("")):
     Facebook post URLs are automatically extracted, cleaned, and deduplicated.
 
     Usage:
-        curl -X POST http://localhost:8000/api/import --data-binary @urls.txt
-        curl -X POST http://localhost:8000/api/import --data-binary @console_output.txt
-        curl -X POST http://localhost:8000/api/import?page_name=MyPage --data-binary @urls.txt
-        curl -X POST http://localhost:8000/api/import -H "Content-Type: application/json" \
+        curl -X POST http://localhost:8150/api/import --data-binary @urls.txt
+        curl -X POST http://localhost:8150/api/import --data-binary @console_output.txt
+        curl -X POST http://localhost:8150/api/import?page_name=MyPage --data-binary @urls.txt
+        curl -X POST http://localhost:8150/api/import -H "Content-Type: application/json" \
              -d '{"urls": ["https://facebook.com/page/posts/123"], "page_name": "My Page"}'
     """
     content_type = request.headers.get("content-type", "")
@@ -1002,12 +1120,19 @@ async def api_ingest(request: Request):
             "post_dir": str(post_dir),
         }
 
+        # Sanitize post data — reject login walls, strip chrome
+        post_data = sanitize_post(post_data, page_name)
+        if post_data is None:
+            skipped += 1
+            continue
+
         db.save_post(post_data, account="extension")
         saved += 1
 
-        # Save comments
+        # Save comments (filtered for garbage)
         comments = post.get("comments", [])
         if comments:
+            comments = sanitize_comments(comments, page_name)
             new_comments = db.save_comments(post_id, comments)
             total_comments += new_comments
 
@@ -1070,6 +1195,25 @@ async def api_ingest(request: Request):
     }
 
 
+@app.post("/api/cleanup")
+async def api_cleanup(request: Request):
+    """
+    Run data quality cleanup on existing posts and comments.
+
+    Optional JSON body: {"page_name": "Vote Kevin Crye"}
+    If page_name is empty, cleans all pages.
+    """
+    page_name = ""
+    try:
+        data = await request.json()
+        page_name = data.get("page_name", "")
+    except Exception:
+        pass
+
+    results = db.cleanup_bad_data(page_name)
+    return results
+
+
 @app.get("/api/categories")
 async def api_categories():
     return db.get_categories()
@@ -1089,7 +1233,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="FB Monitor Web UI")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address")
-    parser.add_argument("--port", type=int, default=8000, help="Port")
+    parser.add_argument("--port", type=int, default=8150, help="Port")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

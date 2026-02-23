@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from sanitize import (
+    is_login_wall, is_garbage_post, strip_page_chrome, clean_reaction_count,
+    resolve_relative_timestamp, is_garbage_comment,
+)
+
 log = logging.getLogger("fb-monitor")
 
 DB_PATH = Path(__file__).parent / "fb_monitor.db"
@@ -803,6 +808,27 @@ def get_entities_for_person(person_id: int, db_path: Optional[Path] = None) -> l
 # Read operations (used by the web UI)
 # ---------------------------------------------------------------------------
 
+def get_page_stats(db_path: Optional[Path] = None) -> list[dict]:
+    """Get aggregated stats for each monitored page."""
+    conn = get_connection(db_path)
+    rows = conn.execute("""
+        SELECT
+            p.page_name,
+            MAX(p.page_url) as page_url,
+            COUNT(*) as total_posts,
+            SUM(CASE WHEN p.author = p.page_name THEN 1 ELSE 0 END) as owner_posts,
+            SUM(CASE WHEN p.author != p.page_name THEN 1 ELSE 0 END) as community_posts,
+            MAX(p.detected_at) as latest_post_date,
+            (SELECT COUNT(*) FROM people_pages pp WHERE pp.page_name = p.page_name) as people_count,
+            (SELECT COUNT(*) FROM entity_pages ep WHERE ep.page_name = p.page_name) as entity_count
+        FROM posts p
+        GROUP BY p.page_name
+        ORDER BY latest_post_date DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_posts(
     page_name: str = "",
     search: str = "",
@@ -1117,3 +1143,206 @@ def get_import_counts(db_path: Optional[Path] = None) -> dict:
     }
     conn.close()
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Data quality cleanup
+# ---------------------------------------------------------------------------
+
+def cleanup_bad_data(page_name: str = "", db_path: Optional[Path] = None) -> dict:
+    """
+    Clean existing data: delete login wall posts, strip chrome, resolve
+    timestamps, clean reaction counts, delete garbage comments.
+
+    If page_name is provided, only cleans that page. Otherwise cleans all.
+    Returns a summary dict of actions taken.
+    """
+    conn = get_connection(db_path)
+    results = {
+        "login_wall_posts_deleted": 0,
+        "garbage_posts_deleted": 0,
+        "posts_chrome_stripped": 0,
+        "posts_text_swapped": 0,
+        "timestamps_resolved": 0,
+        "reaction_counts_cleaned": 0,
+        "garbage_comments_deleted": 0,
+    }
+
+    try:
+        # Fetch posts to process
+        if page_name:
+            posts = conn.execute(
+                "SELECT id, post_id, page_name, text, timestamp, timestamp_raw, "
+                "reaction_count, detected_at FROM posts WHERE page_name = ?",
+                (page_name,),
+            ).fetchall()
+        else:
+            posts = conn.execute(
+                "SELECT id, post_id, page_name, text, timestamp, timestamp_raw, "
+                "reaction_count, detected_at FROM posts"
+            ).fetchall()
+
+        posts = [dict(r) for r in posts]
+        delete_post_ids = []
+
+        for post in posts:
+            text = post.get("text", "") or ""
+            pid = post["post_id"]
+            pname = post.get("page_name", "")
+
+            # 1. Delete login wall posts
+            if is_login_wall(text):
+                delete_post_ids.append(pid)
+                results["login_wall_posts_deleted"] += 1
+                continue
+
+            # 2. Strip page chrome from text
+            cleaned_text = strip_page_chrome(text, pname)
+            if cleaned_text != text:
+                conn.execute(
+                    "UPDATE posts SET text = ? WHERE post_id = ?",
+                    (cleaned_text, pid),
+                )
+                results["posts_chrome_stripped"] += 1
+                text = cleaned_text  # use cleaned text for subsequent checks
+
+            # 2b. Delete garbage posts (comment fragments captured as posts)
+            if is_garbage_post(text, pname):
+                delete_post_ids.append(pid)
+                results["garbage_posts_deleted"] = results.get("garbage_posts_deleted", 0) + 1
+                continue
+
+            # 3. Resolve relative timestamps
+            ts = post.get("timestamp", "") or ""
+            ts_raw = post.get("timestamp_raw", "") or ""
+            raw_to_resolve = ts_raw or ts
+            if raw_to_resolve:
+                # Use detected_at as reference date for existing data
+                ref_date = None
+                detected = post.get("detected_at", "")
+                if detected:
+                    try:
+                        from dateutil.parser import parse as dateutil_parse
+                        ref_date = dateutil_parse(detected)
+                    except Exception:
+                        try:
+                            ref_date = datetime.fromisoformat(detected)
+                        except Exception:
+                            ref_date = None
+
+                resolved = resolve_relative_timestamp(raw_to_resolve, ref_date)
+                if resolved != raw_to_resolve:
+                    conn.execute(
+                        "UPDATE posts SET timestamp = ? WHERE post_id = ?",
+                        (resolved, pid),
+                    )
+                    results["timestamps_resolved"] += 1
+
+            # 4. Clean reaction counts
+            rc = post.get("reaction_count", "") or ""
+            if rc:
+                cleaned_rc = clean_reaction_count(rc)
+                if cleaned_rc != rc:
+                    conn.execute(
+                        "UPDATE posts SET reaction_count = ? WHERE post_id = ?",
+                        (cleaned_rc, pid),
+                    )
+                    results["reaction_counts_cleaned"] += 1
+
+        # Delete login wall posts and their related data
+        for pid in delete_post_ids:
+            conn.execute("DELETE FROM comments WHERE post_id = ?", (pid,))
+            conn.execute("DELETE FROM attachments WHERE post_id = ?", (pid,))
+            conn.execute("DELETE FROM people_posts WHERE post_id = ?", (pid,))
+            conn.execute("DELETE FROM post_categories WHERE post_id = ?", (pid,))
+            conn.execute("DELETE FROM media_queue WHERE post_id = ?", (pid,))
+            conn.execute("DELETE FROM posts WHERE post_id = ?", (pid,))
+
+        # 5. Fix swapped post text / comment text
+        # When the post text is short and matches a comment, and a longer
+        # comment looks like the real post body, swap them.
+        results["posts_text_swapped"] = 0
+        surviving_pids = [p["post_id"] for p in posts if p["post_id"] not in delete_post_ids]
+        for pid in surviving_pids:
+            post_row = conn.execute(
+                "SELECT text FROM posts WHERE post_id = ?", (pid,)
+            ).fetchone()
+            if not post_row:
+                continue
+            post_text = (post_row["text"] or "").strip()
+
+            # Get all comments for this post
+            comment_rows = conn.execute(
+                "SELECT id, text FROM comments WHERE post_id = ? ORDER BY id",
+                (pid,),
+            ).fetchall()
+            if not comment_rows:
+                continue
+
+            comment_texts = [(r["id"], (r["text"] or "").strip()) for r in comment_rows]
+
+            # Check: is the post text identical to one of its comments?
+            post_matches_comment = any(ct == post_text for _, ct in comment_texts)
+            if not post_matches_comment:
+                continue
+
+            # Find the longest comment — if it's substantially longer than post text,
+            # it's probably the real post body that got swapped
+            longest_cid, longest_ct = max(comment_texts, key=lambda x: len(x[1]))
+            if len(longest_ct) <= len(post_text) or len(longest_ct) < 50:
+                continue
+
+            # Swap: set post text to the longest comment, delete that comment,
+            # and add the old post text as a comment
+            conn.execute(
+                "UPDATE posts SET text = ? WHERE post_id = ?",
+                (longest_ct, pid),
+            )
+            conn.execute("DELETE FROM comments WHERE id = ?", (longest_cid,))
+            # Add old (short) post text as a comment (it was a real comment)
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT OR IGNORE INTO comments (post_id, author, text, timestamp, is_reply, detected_at) "
+                "VALUES (?, '', ?, '', 0, ?)",
+                (pid, post_text, now),
+            )
+            results["posts_text_swapped"] += 1
+            log.info(f"  Swapped post/comment text for {pid}: "
+                     f"'{post_text[:40]}...' <-> '{longest_ct[:40]}...'")
+
+        # 6. Delete garbage comments
+        if page_name:
+            comments = conn.execute(
+                "SELECT c.id, c.author, c.text FROM comments c "
+                "JOIN posts p ON c.post_id = p.post_id "
+                "WHERE p.page_name = ?",
+                (page_name,),
+            ).fetchall()
+        else:
+            comments = conn.execute(
+                "SELECT c.id, c.author, c.text FROM comments c "
+                "JOIN posts p ON c.post_id = p.post_id"
+            ).fetchall()
+
+        garbage_ids = []
+        for c in comments:
+            c = dict(c)
+            if is_garbage_comment(c.get("author", ""), c.get("text", ""), page_name):
+                garbage_ids.append(c["id"])
+
+        for cid in garbage_ids:
+            conn.execute("DELETE FROM people_comments WHERE comment_id = ?", (cid,))
+            conn.execute("DELETE FROM comments WHERE id = ?", (cid,))
+
+        results["garbage_comments_deleted"] = len(garbage_ids)
+
+        conn.commit()
+
+    except Exception as e:
+        log.error(f"Cleanup failed: {e}")
+        conn.rollback()
+        results["error"] = str(e)
+    finally:
+        conn.close()
+
+    return results
