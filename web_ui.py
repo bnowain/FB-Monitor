@@ -62,7 +62,7 @@ async def pages_list(request: Request):
     })
 
 
-@app.get("/pages/{page_name}", response_class=HTMLResponse)
+@app.get("/pages/{page_name:path}", response_class=HTMLResponse)
 async def page_feed(
     request: Request,
     page_name: str,

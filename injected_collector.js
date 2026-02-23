@@ -410,10 +410,30 @@
       if (noisePatterns.some(p => p.test(text))) return;
 
       let ts = '';
-      const tsEl = el.querySelector('a[href*="comment_id"] > span') || el.querySelector('abbr');
-      if (tsEl) ts = tsEl.textContent?.trim() || '';
+      // Look for timestamp: abbr first (most reliable), then small time-like
+      // text near "Like · Reply" links. Avoid a[href*="comment_id"] > span
+      // which often matches the author name instead.
+      const abbrEl = el.querySelector('abbr[data-utime], abbr[title], time[datetime]');
+      if (abbrEl) {
+        ts = abbrEl.getAttribute('title') || abbrEl.getAttribute('datetime') || abbrEl.textContent?.trim() || '';
+      }
+      if (!ts) {
+        // Fallback: look for short relative timestamps (e.g. "3d", "1h", "2w")
+        el.querySelectorAll('a span, span').forEach(span => {
+          if (ts) return;
+          const t = span.textContent?.trim() || '';
+          if (/^\d+[hmdws]$/.test(t) || /^\d+\s*(hr|min|day|week)s?\s*(ago)?$/i.test(t)) {
+            ts = t;
+          }
+        });
+      }
 
-      const isReply = el.closest('ul')?.closest('li') !== null;
+      // is_reply: check if this comment's parent <li> is nested inside
+      // another comment's <li> (not just the top-level comment list).
+      const parentLi = el.closest('li');
+      const parentUl = parentLi?.parentElement?.closest('ul[role="list"]');
+      const grandparentLi = parentUl?.closest('li');
+      const isReply = grandparentLi !== null && grandparentLi !== parentLi;
 
       const key = `${author.toLowerCase()}|${text.toLowerCase().substring(0, 100)}`;
       if (seen.has(key)) return;

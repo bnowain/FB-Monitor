@@ -557,6 +557,15 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                     if comments:
                         db_save_comments(post_id, comments)
 
+                    # Save attachments to DB
+                    attachment_result = {
+                        "images": [], "videos": [],
+                        "image_urls": post.get("image_urls", []),
+                        "video_urls": post.get("video_urls", []),
+                    }
+                    if attachment_result["image_urls"] or attachment_result["video_urls"]:
+                        db_save_attachments(post_id, attachment_result)
+
                     # Save post.json to disk
                     output_base = Path(config.get("output_dir", "downloads")) / page_key
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -567,11 +576,7 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                     post_json = dict(post)
                     post_json.pop("comments", None)
                     post_json["post_dir"] = str(post_dir)
-                    post_json["attachments"] = {
-                        "images": [], "videos": [],
-                        "image_urls": post.get("image_urls", []),
-                        "video_urls": post.get("video_urls", []),
-                    }
+                    post_json["attachments"] = attachment_result
 
                     post_json_path = post_dir / "post.json"
                     with open(post_json_path, "w", encoding="utf-8") as f:

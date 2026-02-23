@@ -62,13 +62,30 @@ def _strategy_aria(page) -> list[Comment]:
                     || el.querySelector('a > b');
                 const textEl = el.querySelector('div[dir="auto"]')
                     || el.querySelector('span[dir="auto"]');
-                const timeEl = el.querySelector('a[href*="comment_id"] > span')
-                    || el.querySelector('abbr');
-                const isReply = el.closest('ul')?.closest('li') !== null;
+                // Timestamp: prefer abbr/time, then short relative strings
+                const abbrEl = el.querySelector('abbr[data-utime], abbr[title], time[datetime]');
+                let timestamp = '';
+                if (abbrEl) {
+                    timestamp = abbrEl.getAttribute('title') || abbrEl.getAttribute('datetime') || abbrEl.textContent?.trim() || '';
+                }
+                if (!timestamp) {
+                    el.querySelectorAll('a span, span').forEach(span => {
+                        if (timestamp) return;
+                        const t = span.textContent?.trim() || '';
+                        if (/^\d+[hmdws]$/.test(t) || /^\d+\s*(hr|min|day|week)s?\s*(ago)?$/i.test(t)) {
+                            timestamp = t;
+                        }
+                    });
+                }
+                // is_reply: nested li inside another comment's li
+                const parentLi = el.closest('li');
+                const parentUl = parentLi?.parentElement?.closest('ul[role="list"]');
+                const grandparentLi = parentUl?.closest('li');
+                const isReply = grandparentLi !== null && grandparentLi !== parentLi;
                 return {
                     author: authorEl ? authorEl.innerText.trim() : '',
                     text: textEl ? textEl.innerText.trim() : '',
-                    timestamp: timeEl ? timeEl.innerText.trim() : '',
+                    timestamp: timestamp,
                     isReply: isReply
                 };
             })"""
