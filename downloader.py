@@ -352,35 +352,38 @@ def download_video_ytdlp(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        if result.returncode == 0:
-            # Find downloaded files from yt-dlp output
-            saved = []
-            for line in result.stdout.splitlines():
-                if "Destination:" in line:
-                    path = line.split("Destination:")[-1].strip()
-                    saved.append(path)
-                elif "has already been downloaded" in line:
-                    path = line.split("[download]")[-1].split("has already")[0].strip()
-                    saved.append(path)
+        # Find downloaded files — prefer scanning disk over parsing yt-dlp
+        # output because yt-dlp logs "Destination:" for pre-merge stream
+        # files (e.g. .f12345v.mp4) that get deleted after merging into
+        # the final file (e.g. video_00001.mp4).
+        saved = []
+        for ext in ("*.mp4", "*.mkv", "*.webm"):
+            for p in output_dir.glob(ext):
+                if not str(p).endswith(".part"):
+                    saved.append(str(p))
 
-            if not saved:
-                # Check output dir for any video files
-                for ext in ("*.mp4", "*.mkv", "*.webm"):
-                    saved.extend(str(p) for p in output_dir.glob(ext))
-
+        if saved:
             log.info(f"  Video download complete: {len(saved)} file(s)")
             return saved
-        else:
-            # yt-dlp might fail for non-video posts — that's fine
+
+        if result.returncode != 0:
             if "Unsupported URL" in result.stderr or "no video" in result.stderr.lower():
                 log.debug("  No downloadable video at this URL")
             else:
                 log.warning(f"  yt-dlp error: {result.stderr[:200]}")
-            return []
+        return []
 
     except subprocess.TimeoutExpired:
         log.warning("  yt-dlp timed out after 300s")
-        return []
+        # Check for partial video files that are still usable
+        saved = []
+        for ext in ("*.mp4", "*.mkv", "*.webm"):
+            for p in output_dir.glob(ext):
+                if not str(p).endswith(".part") and p.stat().st_size > 100000:
+                    saved.append(str(p))
+        if saved:
+            log.info(f"  Found {len(saved)} partial video file(s) after timeout")
+        return saved
     except FileNotFoundError:
         log.error("  yt-dlp not found. Install: pip install yt-dlp")
         return []
@@ -431,6 +434,23 @@ def download_attachments(
 
     mode = "remote proxy" if (download_proxy and download_proxy.get("url")) else \
            "SOCKS proxy" if proxy_url else "direct"
+
+    # Filter out video thumbnails from image_urls when we have video URLs.
+    # Facebook puts a preview thumbnail in image_urls for video/reel posts.
+    # These contain "t15.5256-10" (video thumbnail prefix) in the CDN path.
+    is_video_post = bool(video_urls) or any(
+        p in post_url for p in ("/videos/", "/watch/", "/reel/")
+    )
+    if is_video_post and image_urls:
+        filtered_images = [
+            url for url in image_urls
+            if "t15.5256-10" not in url and "/v/t15." not in url
+        ]
+        if len(filtered_images) < len(image_urls):
+            skipped = len(image_urls) - len(filtered_images)
+            log.debug(f"  Filtered {skipped} video thumbnail(s) from image list")
+            image_urls = filtered_images
+            result["image_urls"] = filtered_images
 
     # Download images
     if image_urls:

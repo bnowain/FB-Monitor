@@ -222,6 +222,119 @@
             padding: 3rem;
             color: var(--text-dim);
         }
+
+        /* Scraper status bar */
+        .scraper-bar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            height: 36px;
+            gap: 1.25rem;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            overflow: hidden;
+        }
+        .scraper-bar .sb-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+        .sb-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--text-dim);
+            flex-shrink: 0;
+        }
+        .sb-dot.active {
+            background: var(--green);
+            box-shadow: 0 0 6px var(--green);
+            animation: sb-pulse 2s ease-in-out infinite;
+        }
+        .sb-dot.downloading {
+            background: var(--accent);
+            box-shadow: 0 0 6px var(--accent);
+            animation: sb-pulse 1.5s ease-in-out infinite;
+        }
+        .sb-dot.waiting {
+            background: var(--orange);
+        }
+        .sb-dot.error {
+            background: var(--red);
+        }
+        .sb-dot.offline {
+            background: #555;
+        }
+        @keyframes sb-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .sb-message {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-width: 0;
+        }
+        .sb-progress {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .sb-progress-bar {
+            width: 80px;
+            height: 4px;
+            background: var(--surface2);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .sb-progress-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+        .sb-stats {
+            display: flex;
+            gap: 1rem;
+            margin-left: auto;
+            flex-shrink: 0;
+        }
+        .sb-stat {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .sb-stat .sb-val {
+            color: var(--text);
+            font-weight: 600;
+        }
+        .sb-tor {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+            flex-shrink: 0;
+        }
+        .sb-tor-dots {
+            display: flex;
+            gap: 2px;
+        }
+        .sb-tor-dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--red);
+        }
+        .sb-tor-dot.up {
+            background: var(--green);
+        }
+        .sb-countdown {
+            flex-shrink: 0;
+            color: var(--text-dim);
+        }
     </style>
 </head>
 <body>
@@ -245,8 +358,116 @@
             <a href="/import" class="{% if active_page == 'import' %}active{% endif %}">Import</a>
         </nav>
     </div>
+    <div class="scraper-bar" id="scraper-bar">
+        <div class="sb-indicator">
+            <span class="sb-dot offline" id="sb-dot"></span>
+            <span class="sb-message" id="sb-msg">Connecting...</span>
+        </div>
+        <div class="sb-progress" id="sb-progress" style="display:none;">
+            <div class="sb-progress-bar"><div class="sb-progress-fill" id="sb-fill"></div></div>
+            <span id="sb-pg-text"></span>
+        </div>
+        <div class="sb-stats" id="sb-stats"></div>
+        <div class="sb-tor" id="sb-tor" style="display:none;">
+            <span>Tor</span>
+            <div class="sb-tor-dots" id="sb-tor-dots"></div>
+        </div>
+        <div class="sb-countdown" id="sb-countdown"></div>
+    </div>
     <div class="container">
         {% block content %}{% endblock %}
     </div>
+<script>
+(function(){
+    const dot = document.getElementById('sb-dot');
+    const msg = document.getElementById('sb-msg');
+    const prog = document.getElementById('sb-progress');
+    const fill = document.getElementById('sb-fill');
+    const pgText = document.getElementById('sb-pg-text');
+    const stats = document.getElementById('sb-stats');
+    const tor = document.getElementById('sb-tor');
+    const torDots = document.getElementById('sb-tor-dots');
+    const countdown = document.getElementById('sb-countdown');
+
+    const dotClass = {
+        scraping: 'active', downloading: 'downloading',
+        rechecking: 'active', importing: 'active',
+        starting: 'downloading', waiting: 'waiting',
+        error: 'error', offline: 'offline', idle: 'offline'
+    };
+
+    function update(d) {
+        // Dot color
+        dot.className = 'sb-dot ' + (dotClass[d.state] || 'offline');
+
+        // Message
+        msg.textContent = d.message || 'Unknown';
+
+        // Progress bar
+        if (d.page_progress && d.state === 'scraping') {
+            prog.style.display = 'flex';
+            const pct = Math.round((d.page_progress[0] / d.page_progress[1]) * 100);
+            fill.style.width = pct + '%';
+            pgText.textContent = d.page_progress[0] + '/' + d.page_progress[1];
+        } else {
+            prog.style.display = 'none';
+        }
+
+        // Cycle stats
+        const cs = d.cycle_stats;
+        let parts = [];
+        if (cs) {
+            if (cs.posts_new > 0) parts.push('<span class="sb-stat"><span class="sb-val">' + cs.posts_new + '</span> new</span>');
+            if (cs.posts_found > 0) parts.push('<span class="sb-stat"><span class="sb-val">' + cs.posts_found + '</span> posts</span>');
+            if (cs.images > 0) parts.push('<span class="sb-stat"><span class="sb-val">' + cs.images + '</span> img</span>');
+            if (cs.videos > 0) parts.push('<span class="sb-stat"><span class="sb-val">' + cs.videos + '</span> vid</span>');
+        }
+        stats.innerHTML = parts.join('');
+
+        // Tor health dots
+        if (d.tor && d.tor.total > 0) {
+            tor.style.display = 'flex';
+            let dots = '';
+            for (let i = 0; i < d.tor.total; i++) {
+                dots += '<span class="sb-tor-dot' + (i < d.tor.healthy ? ' up' : '') + '"></span>';
+            }
+            torDots.innerHTML = dots;
+        } else {
+            tor.style.display = 'none';
+        }
+
+        // Countdown
+        if (d.state === 'waiting' && d.next_poll_at) {
+            const remaining = Math.max(0, Math.round(d.next_poll_at - Date.now()/1000));
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            countdown.textContent = m + ':' + String(s).padStart(2, '0');
+        } else {
+            countdown.textContent = '';
+        }
+    }
+
+    // Countdown ticker (updates every second when waiting)
+    let lastData = null;
+    setInterval(function(){
+        if (lastData && lastData.state === 'waiting' && lastData.next_poll_at) {
+            const remaining = Math.max(0, Math.round(lastData.next_poll_at - Date.now()/1000));
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            countdown.textContent = m + ':' + String(s).padStart(2, '0');
+        }
+    }, 1000);
+
+    function poll() {
+        fetch('/api/scraper-status')
+            .then(r => r.json())
+            .then(d => { lastData = d; update(d); })
+            .catch(() => update({state:'offline', message:'Web UI cannot reach scraper status'}));
+    }
+
+    poll();
+    setInterval(poll, 4000);
+})();
+</script>
 </body>
 </html>

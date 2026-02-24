@@ -188,6 +188,8 @@ def init_db(db_path: Optional[Path] = None):
         CREATE INDEX IF NOT EXISTS idx_posts_detected ON posts(detected_at);
         CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
         CREATE INDEX IF NOT EXISTS idx_attachments_post ON attachments(post_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attach_file ON attachments(post_id, type, filename) WHERE filename IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attach_url ON attachments(post_id, type, url) WHERE url IS NOT NULL AND filename IS NULL;
         CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
         CREATE INDEX IF NOT EXISTS idx_people_pages_person ON people_pages(person_id);
         CREATE INDEX IF NOT EXISTS idx_people_posts_person ON people_posts(person_id);

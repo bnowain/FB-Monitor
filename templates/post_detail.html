@@ -339,6 +339,15 @@
 
         <!-- Comments -->
         <div class="comments-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <h3 style="margin: 0;">{{ comments|length }} comment{{ 's' if comments|length != 1 else '' }}</h3>
+                {% if post.post_url %}
+                <button id="btn-retrieve-comments" onclick="retrieveComments()" style="background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
+                    Retrieve Comments
+                </button>
+                {% endif %}
+            </div>
+            <div id="comment-status" style="display:none; padding: 0.5rem 0; font-size: 0.85rem;"></div>
             {% if comments %}
             {% for c in comments %}
             <div class="fb-comment {{ 'reply' if c.is_reply else '' }}">
@@ -427,4 +436,53 @@
         </div>
     </div>
 </div>
+<script>
+function retrieveComments() {
+    const btn = document.getElementById('btn-retrieve-comments');
+    const status = document.getElementById('comment-status');
+    const postId = '{{ post.post_id }}';
+
+    btn.disabled = true;
+    btn.textContent = 'Retrieving...';
+    btn.style.color = 'var(--orange)';
+    status.style.display = 'block';
+    status.style.color = 'var(--orange)';
+    status.textContent = 'Launching browser and navigating to post...';
+
+    fetch('/posts/' + postId + '/retrieve-comments', {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (d.status === 'already_running') {
+                status.textContent = 'Already retrieving comments...';
+            }
+            // Poll for completion
+            const poll = setInterval(() => {
+                fetch('/api/posts/' + postId + '/comment-job')
+                    .then(r => r.json())
+                    .then(j => {
+                        if (j.status === 'done') {
+                            clearInterval(poll);
+                            status.style.color = 'var(--green)';
+                            status.textContent = 'Retrieved ' + j.count + ' comment(s). Reloading...';
+                            setTimeout(() => location.reload(), 1500);
+                        } else if (j.status === 'error') {
+                            clearInterval(poll);
+                            status.style.color = 'var(--red)';
+                            status.textContent = 'Error: ' + (j.error || 'Unknown error');
+                            btn.disabled = false;
+                            btn.textContent = 'Retry';
+                            btn.style.color = 'var(--text-dim)';
+                        }
+                    });
+            }, 3000);
+        })
+        .catch(e => {
+            status.style.color = 'var(--red)';
+            status.textContent = 'Failed to start: ' + e;
+            btn.disabled = false;
+            btn.textContent = 'Retry';
+            btn.style.color = 'var(--text-dim)';
+        });
+}
+</script>
 {% endblock %}

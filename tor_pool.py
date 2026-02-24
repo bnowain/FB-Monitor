@@ -42,6 +42,270 @@ TOR_BUNDLE_DIR = BASE_DIR / "tor-bundle"
 TORRC_TEMPLATE = TOR_BUNDLE_DIR / "torrc"
 POOL_DATA_DIR = TOR_BUNDLE_DIR / "tor-data-pool"
 PID_FILE = POOL_DATA_DIR / "pool-pids.json"
+MAIN_PID_FILE = TOR_BUNDLE_DIR / "main-tor-pid.json"
+TOR_EXE = TOR_BUNDLE_DIR / "tor" / "tor.exe"
+
+
+# ------------------------------------------------------------------
+# Standalone: kill all stale Tor processes from our bundle
+# ------------------------------------------------------------------
+
+def _kill_pid(pid: int, label: str = "") -> bool:
+    """Kill a single process by PID. Returns True if killed."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                capture_output=True, timeout=10,
+            )
+        else:
+            os.kill(pid, signal.SIGKILL)
+        log.debug(f"  Killed stale Tor PID {pid}{f' ({label})' if label else ''}")
+        return True
+    except Exception:
+        return False
+
+
+def _is_port_in_use(port: int) -> bool:
+    """Check if a TCP port is already bound."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _get_pid_on_port(port: int) -> int | None:
+    """Find the PID listening on a port (Windows only)."""
+    if os.name != "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            if f"127.0.0.1:{port}" in line and "LISTENING" in line:
+                parts = line.split()
+                return int(parts[-1])
+    except Exception:
+        pass
+    return None
+
+
+def kill_all_stale_tor(config: dict) -> int:
+    """
+    Kill ALL stale Tor processes from previous runs.
+
+    Covers:
+    1. Saved PIDs from pool-pids.json and main-tor-pid.json
+    2. Anything listening on main Tor ports (9050/9051)
+    3. Anything listening on pool ports (9060+ / 9160+)
+
+    Call this at scraper startup before starting anything Tor-related.
+    Returns number of processes killed.
+    """
+    killed = 0
+    tor_cfg = config.get("tor", {})
+    main_socks = tor_cfg.get("socks_port", 9050)
+    main_control = tor_cfg.get("control_port", 9051)
+    pool_size = tor_cfg.get("pool_size", 0)
+    pool_base = tor_cfg.get("pool_base_socks_port", 9060)
+
+    # 1. Kill from saved PID files
+    for pid_file in (MAIN_PID_FILE, PID_FILE):
+        if pid_file.exists():
+            try:
+                saved = json.loads(pid_file.read_text())
+                entries = saved if isinstance(saved, list) else [saved]
+                for entry in entries:
+                    pid = entry.get("pid", 0)
+                    if pid and _kill_pid(pid, f"saved PID from {pid_file.name}"):
+                        killed += 1
+                pid_file.unlink(missing_ok=True)
+            except Exception as e:
+                log.debug(f"  PID file cleanup error ({pid_file.name}): {e}")
+
+    # 2. Kill anything on main Tor ports
+    for port in (main_socks, main_control):
+        if _is_port_in_use(port):
+            pid = _get_pid_on_port(port)
+            if pid:
+                if _kill_pid(pid, f"main Tor port {port}"):
+                    killed += 1
+
+    # 3. Kill anything on pool ports
+    if pool_size >= 2:
+        for i in range(pool_size):
+            for port in (pool_base + i, pool_base + 100 + i):
+                if _is_port_in_use(port):
+                    pid = _get_pid_on_port(port)
+                    if pid:
+                        if _kill_pid(pid, f"pool port {port}"):
+                            killed += 1
+
+    if killed:
+        time.sleep(2)  # Windows needs time to release handles
+        log.info(f"  Cleaned up {killed} stale Tor process(es) from previous run")
+
+    return killed
+
+
+def ensure_main_tor(config: dict) -> subprocess.Popen | None:
+    """
+    Start the main Tor instance (port 9050) if not already running.
+
+    Returns the Popen handle if we started it, None if already running
+    or Tor is disabled.
+    """
+    tor_cfg = config.get("tor", {})
+    if not tor_cfg.get("enabled", False):
+        return None
+
+    socks_port = tor_cfg.get("socks_port", 9050)
+
+    # Already running and responsive?
+    if _is_port_in_use(socks_port):
+        log.info(f"Main Tor already running on port {socks_port}")
+        return None
+
+    if not TOR_EXE.exists():
+        log.error(f"tor.exe not found: {TOR_EXE}")
+        return None
+
+    if not TORRC_TEMPLATE.exists():
+        log.error(f"torrc not found: {TORRC_TEMPLATE}")
+        return None
+
+    log.info(f"Starting main Tor instance (SOCKS:{socks_port})...")
+
+    # Build absolute-path torrc for main instance
+    # The base torrc uses relative paths — we need absolute for subprocess
+    base_lines = TORRC_TEMPLATE.read_text().splitlines()
+    resolved_lines = []
+    for line in base_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            resolved_lines.append(line)
+            continue
+        key = stripped.split()[0].lower() if stripped.split() else ""
+        if key == "clienttransportplugin":
+            parts = stripped.split()
+            for i, part in enumerate(parts):
+                if part.startswith("./"):
+                    parts[i] = str(TOR_BUNDLE_DIR / part[2:])
+            resolved_lines.append(" ".join(parts))
+        elif key in ("geoipfile", "geoipv6file"):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].startswith("./"):
+                parts[1] = str(TOR_BUNDLE_DIR / parts[1][2:])
+            resolved_lines.append(" ".join(parts))
+        elif key == "datadirectory":
+            parts = stripped.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].startswith("./"):
+                parts[1] = str(TOR_BUNDLE_DIR / parts[1][2:])
+            resolved_lines.append(" ".join(parts))
+        elif key == "log":
+            # Redirect stdout to file for managed instance
+            log_path = str(TOR_BUNDLE_DIR / "tor_output.log").replace("\\", "/")
+            resolved_lines.append(f"Log notice file {log_path}")
+        else:
+            resolved_lines.append(line)
+
+    # Write resolved torrc
+    resolved_torrc = TOR_BUNDLE_DIR / "torrc-main-managed"
+    resolved_torrc.write_text("\n".join(resolved_lines))
+
+    # Ensure data dir exists
+    data_dir = TOR_BUNDLE_DIR / "tor-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clear stale lock
+    lock_file = data_dir / "lock"
+    if lock_file.exists():
+        try:
+            lock_file.unlink()
+        except Exception:
+            pass
+
+    try:
+        proc = subprocess.Popen(
+            [str(TOR_EXE), "-f", str(resolved_torrc)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        log.info(f"  Main Tor started: PID {proc.pid}")
+
+        # Save PID for cleanup on next run
+        try:
+            MAIN_PID_FILE.write_text(json.dumps({
+                "pid": proc.pid,
+                "socks_port": socks_port,
+                "control_port": tor_cfg.get("control_port", 9051),
+            }))
+        except Exception:
+            pass
+
+        # Wait for bootstrap (poll control port)
+        deadline = time.time() + 120
+        last_pct = 0
+        while time.time() < deadline:
+            try:
+                sock = socket.create_connection(
+                    ("127.0.0.1", tor_cfg.get("control_port", 9051)), timeout=5
+                )
+                pwd = tor_cfg.get("control_password", "")
+                if pwd:
+                    sock.sendall(f'AUTHENTICATE "{pwd}"\r\n'.encode())
+                else:
+                    sock.sendall(b"AUTHENTICATE\r\n")
+                auth_resp = sock.recv(256).decode()
+                if "250" in auth_resp:
+                    sock.sendall(b"GETINFO status/bootstrap-phase\r\n")
+                    status = sock.recv(512).decode()
+                    sock.close()
+                    if "PROGRESS=" in status:
+                        pct = int(status.split("PROGRESS=")[1].split()[0])
+                        if pct != last_pct:
+                            log.info(f"  Main Tor bootstrap: {pct}%")
+                            last_pct = pct
+                        if pct >= 100:
+                            log.info("  Main Tor bootstrapped successfully")
+                            return proc
+                else:
+                    sock.close()
+            except (ConnectionRefusedError, OSError):
+                pass
+            except Exception:
+                pass
+            time.sleep(3)
+
+        log.warning("  Main Tor: bootstrap timeout after 120s")
+        return proc  # Return anyway — it may finish later
+
+    except Exception as e:
+        log.error(f"  Failed to start main Tor: {e}")
+        return None
+
+
+def stop_main_tor(proc: subprocess.Popen | None):
+    """Gracefully stop the main Tor instance we started."""
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=10)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    log.info("Main Tor stopped")
+    try:
+        MAIN_PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 class InstanceState(Enum):
@@ -93,82 +357,36 @@ class TorPool:
 
     # ------------------------------------------------------------------
     # Lifecycle: cleanup stale processes, PID tracking, atexit
+    # Uses standalone _kill_pid / _is_port_in_use / _get_pid_on_port
     # ------------------------------------------------------------------
 
-    def _kill_pid(self, pid: int, label: str = "") -> bool:
-        """Kill a single process by PID. Returns True if killed."""
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True, timeout=10,
-                )
-            else:
-                os.kill(pid, signal.SIGKILL)
-            log.debug(f"  Killed stale Tor PID {pid}{f' ({label})' if label else ''}")
-            return True
-        except Exception:
-            return False
-
-    def _is_port_in_use(self, port: int) -> bool:
-        """Check if a TCP port is already bound."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            return s.connect_ex(("127.0.0.1", port)) == 0
-
-    def _get_pid_on_port(self, port: int) -> int | None:
-        """Find the PID listening on a port (Windows only, returns None on other OS)."""
-        if os.name != "nt":
-            return None
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True, text=True, timeout=10,
-            )
-            for line in result.stdout.splitlines():
-                if f"127.0.0.1:{port}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    return int(parts[-1])
-        except Exception:
-            pass
-        return None
-
     def _cleanup_stale_processes(self):
-        """
-        Kill leftover Tor pool processes from a previous run.
-
-        Strategy:
-        1. Read saved PIDs from pool-pids.json and kill any still running
-        2. Check each pool port — if something is listening, kill it
-        3. Wait briefly for Windows to release handles
-        """
+        """Kill leftover Tor pool processes from a previous run."""
         killed = 0
 
-        # --- 1. Kill processes from saved PID file ---
+        # 1. Kill from saved PID file
         if PID_FILE.exists():
             try:
                 saved = json.loads(PID_FILE.read_text())
                 for entry in saved:
                     pid = entry.get("pid", 0)
-                    if pid and self._kill_pid(pid, f"saved instance {entry.get('index', '?')}"):
+                    if pid and _kill_pid(pid, f"saved instance {entry.get('index', '?')}"):
                         killed += 1
                 PID_FILE.unlink(missing_ok=True)
             except Exception as e:
                 log.debug(f"  PID file cleanup error: {e}")
 
-        # --- 2. Kill anything listening on our port range ---
+        # 2. Kill anything on pool port range
         for i in range(self.pool_size):
             for port in (self.base_socks_port + i, self.base_socks_port + 100 + i):
-                if self._is_port_in_use(port):
-                    pid = self._get_pid_on_port(port)
-                    if pid:
-                        if self._kill_pid(pid, f"port {port}"):
-                            killed += 1
+                if _is_port_in_use(port):
+                    pid = _get_pid_on_port(port)
+                    if pid and _kill_pid(pid, f"port {port}"):
+                        killed += 1
 
         if killed:
-            # Give Windows time to release handles and ports
             time.sleep(2)
-            log.info(f"  Cleaned up {killed} stale Tor process(es) from previous run")
+            log.info(f"  Cleaned up {killed} stale Tor pool process(es)")
 
     def _save_pids(self):
         """Write current pool PIDs to disk for crash recovery."""
@@ -587,10 +805,10 @@ class TorPool:
 
         # Also kill anything else holding our ports (stale processes)
         for port in (instance.socks_port, instance.control_port):
-            if self._is_port_in_use(port):
-                pid = self._get_pid_on_port(port)
+            if _is_port_in_use(port):
+                pid = _get_pid_on_port(port)
                 if pid:
-                    self._kill_pid(pid, f"stale on port {port}")
+                    _kill_pid(pid, f"stale on port {port}")
 
         # Windows file handle release
         time.sleep(1.0)
@@ -689,12 +907,11 @@ class TorPool:
 
             # --- (a) Per-instance checks ---
             for instance in self.instances:
-                # Skip permanently failed instances (restarts exhausted)
-                if (instance.state == InstanceState.FAILED
-                        and instance.restart_count >= self.max_restarts):
+                # Skip already-known FAILED instances (waiting for restart)
+                if instance.state == InstanceState.FAILED:
                     continue
 
-                # Crash detection
+                # Crash detection — only logs once (sets state to FAILED)
                 if instance.process and instance.process.poll() is not None:
                     exit_code = instance.process.returncode
                     instance.state = InstanceState.FAILED
@@ -732,28 +949,17 @@ class TorPool:
                         log.warning(f"  Tor pool instance {instance.index}: "
                                     f"control port unreachable, marking stalled")
 
-            # --- (b) Auto-restart (one per cycle) ---
-            healthy_count = len(self.get_healthy())
+            # --- (b) Auto-restart (one per cycle to prevent thundering herd) ---
             restarted_this_cycle = False
 
-            # Always restart STALLED instances first (alive but useless)
+            # Restart STALLED first (alive but useless), then FAILED
             for instance in self.instances:
                 if restarted_this_cycle:
                     break
-                if (instance.state == InstanceState.STALLED
+                if (instance.state in (InstanceState.STALLED, InstanceState.FAILED)
                         and instance.restart_count < self.max_restarts):
                     self._restart_instance(instance)
                     restarted_this_cycle = True
-
-            # Restart FAILED only when below min_healthy
-            if not restarted_this_cycle and healthy_count < self.min_healthy:
-                for instance in self.instances:
-                    if restarted_this_cycle:
-                        break
-                    if (instance.state == InstanceState.FAILED
-                            and instance.restart_count < self.max_restarts):
-                        self._restart_instance(instance)
-                        restarted_this_cycle = True
 
             # --- (c) Periodic summary (every 60s) ---
             if (now - self._last_summary_log) >= 60:

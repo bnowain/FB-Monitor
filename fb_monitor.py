@@ -68,6 +68,7 @@ from sessions import (
 )
 from collector import inject as collector_inject, expand_and_extract
 from sanitize import is_login_wall
+from scraper_status import status as scraper_status
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -91,6 +92,59 @@ def load_config() -> dict:
 
 def slugify(text: str) -> str:
     return re.sub(r'[^\w]+', '_', text.lower()).strip('_')
+
+
+# ---------------------------------------------------------------------------
+# Login wall dismissal
+# ---------------------------------------------------------------------------
+
+def try_dismiss_login_wall(page) -> bool:
+    """
+    Try to dismiss Facebook's login overlay by clicking the close button.
+
+    Facebook often shows a modal login wall over visible content. Clicking
+    the X/close button dismisses it and lets us access the page underneath.
+    Returns True if we successfully dismissed it and page content is now visible.
+    """
+    # Common selectors for the login wall close/dismiss button
+    close_selectors = [
+        '[aria-label="Close"]',
+        '[aria-label="close"]',
+        'div[role="dialog"] [aria-label="Close"]',
+        'div[role="dialog"] div[aria-label="close"]',
+        # The X button in the top-right of the login modal
+        'div[role="banner"] ~ div [role="button"]',
+        # Generic close buttons in dialogs
+        'div[role="dialog"] div[role="button"]:first-child',
+    ]
+
+    for selector in close_selectors:
+        try:
+            el = page.query_selector(selector)
+            if el and el.is_visible():
+                el.click()
+                page.wait_for_timeout(1500)
+
+                # Check if login wall is gone
+                body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
+                if not is_login_wall(body):
+                    log.info("  Login wall dismissed via close button")
+                    return True
+        except Exception:
+            continue
+
+    # Also try pressing Escape
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1000)
+        body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
+        if not is_login_wall(body):
+            log.info("  Login wall dismissed via Escape key")
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +412,9 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
             try:
                 body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
                 if is_login_wall(body):
+                    if try_dismiss_login_wall(page):
+                        log.info(f"  Feed page loaded via pool after dismissing login wall (SOCKS:{winning_port})")
+                        return page, context, browser, True
                     log.info("  Racing winner hit login wall on full load, falling back")
                     if tor_pool and winner:
                         tor_pool.record_login_wall(winner)
@@ -419,10 +476,13 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
                     pass
                 continue
 
-            # Check for login wall
+            # Check for login wall — try to dismiss before giving up
             try:
                 body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
                 if is_login_wall(body):
+                    if try_dismiss_login_wall(page):
+                        log.info(f"  Feed page loaded after dismissing login wall (instance {inst.index})")
+                        return page, context, browser, True
                     log.info(f"  Attempt {attempt}/{max_retries}: login wall on instance {inst.index}")
                     tor_pool.record_login_wall(inst)
                     _close_session_safe(context, browser, True)
@@ -473,10 +533,13 @@ def _feed_navigate(pw, config, url, rate_limiter, max_retries=5, tor_pool=None):
                 continue
             return None
 
-        # Check for login wall
+        # Check for login wall — try to dismiss before giving up
         try:
             body = page.evaluate("() => document.body.innerText.substring(0, 1000)")
             if is_login_wall(body):
+                if try_dismiss_login_wall(page):
+                    log.info(f"  Feed page loaded after dismissing login wall (attempt {attempt})")
+                    return page, context, browser, needs_close
                 log.info(f"  Attempt {attempt}/{max_retries}: login wall")
                 _close_session_safe(context, browser, needs_close)
                 if using_tor and attempt < max_retries:
@@ -512,35 +575,42 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
 
     max_retries = config.get("feed_max_retries", 5)
     all_new = []
+    _state_lock = threading.Lock()
 
-    with sync_playwright() as pw:
-        for page_cfg in anon_pages:
-            if not page_cfg.get("enabled", True):
-                continue
+    enabled_pages = [p for p in anon_pages if p.get("enabled", True)]
+    total_pages = len(enabled_pages)
+    concurrency = config.get("feed_concurrency", 3)
+    pages_done = [0]  # mutable counter for threads
 
-            page_name = page_cfg["name"]
-            page_url = page_cfg["url"]
-            page_key = slugify(page_name)
+    def _process_page(page_cfg):
+        """Process a single page — designed to run in a thread."""
+        page_name = page_cfg["name"]
+        page_url = page_cfg["url"]
+        page_key = slugify(page_name)
+        page_new = []
 
-            log.info(f"Feed poll: {page_name}")
+        with _state_lock:
+            pages_done[0] += 1
+            page_idx = pages_done[0]
+        scraper_status.scraping_page(page_name, page_idx, total_pages)
+        log.info(f"Feed poll: {page_name}")
 
-            # Navigate with retry logic (races Tor pool if available)
+        with sync_playwright() as pw:
             result = _feed_navigate(pw, config, page_url, rate_limiter, max_retries, tor_pool=tor_pool)
             if result is None:
                 log.warning(f"  Could not load feed for {page_name}")
-                continue
+                scraper_status.page_done()
+                return page_new
 
             page, context, browser, needs_close = result
 
             try:
-                # Scroll to load posts
                 human_scroll(page, scroll_count=random.randint(2, 4))
                 page.wait_for_timeout(2000)
 
-                # Inject collector and extract
                 if not collector_inject(page):
                     log.warning(f"  Collector injection failed for {page_name}")
-                    continue
+                    return page_new
 
                 posts = expand_and_extract(
                     page, page_name=page_name, page_url=page_url,
@@ -548,23 +618,24 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
 
                 if not posts:
                     log.info(f"  No posts extracted from {page_name}")
-                    continue
+                    scraper_status.page_done()
+                    return page_new
 
-                # Filter to new posts only
                 new_count = 0
+                cycle_images = 0
+                cycle_videos = 0
                 for post in posts:
                     post_id = post.get("post_id", "")
-                    if not post_id or is_post_seen(state, page_key, post_id):
-                        continue
+                    with _state_lock:
+                        if not post_id or is_post_seen(state, page_key, post_id):
+                            continue
 
-                    # Save to DB
                     db_save_post(post, account="anonymous")
 
                     comments = post.get("comments", [])
                     if comments:
                         db_save_comments(post_id, comments)
 
-                    # Download attachments through Tor (anonymous mode)
                     image_urls = post.get("image_urls", [])
                     video_urls = post.get("video_urls", [])
                     post_url = post.get("url", "")
@@ -583,6 +654,11 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                     dl_proxy_config = config.get("download_proxy")
 
                     if image_urls or video_urls:
+                        scraper_status.downloading_media(
+                            page_name,
+                            images=len(image_urls),
+                            videos=len(video_urls),
+                        )
                         attachment_result = download_attachments(
                             post_url=post_url,
                             image_urls=image_urls,
@@ -601,7 +677,6 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                     if attachment_result.get("image_urls") or attachment_result.get("video_urls"):
                         db_save_attachments(post_id, attachment_result)
 
-                    # Save post.json to disk
                     post_json = dict(post)
                     post_json.pop("comments", None)
                     post_json["post_dir"] = str(post_dir)
@@ -611,18 +686,24 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                     with open(post_json_path, "w", encoding="utf-8") as f:
                         json.dump(post_json, f, indent=2, ensure_ascii=False)
 
-                    # Register for comment tracking
-                    add_tracking_job(state, post_id, post.get("url", ""),
-                                     str(post_dir), page_name, "anonymous")
-
-                    mark_post_seen(state, page_key, post_id)
+                    with _state_lock:
+                        add_tracking_job(state, post_id, post.get("url", ""),
+                                         str(post_dir), page_name, "anonymous")
+                        mark_post_seen(state, page_key, post_id)
 
                     preview = post.get("text", "")[:120] or "(no text)"
                     send_notification(config, page_name, post.get("url", ""), preview)
 
-                    all_new.append(post)
+                    page_new.append(post)
                     new_count += 1
+                    cycle_images += len(attachment_result.get("images", []))
+                    cycle_videos += len(attachment_result.get("videos", []))
                     log.info(f"  NEW: {post_id[:50]}")
+
+                scraper_status.page_done(
+                    posts_found=len(posts), new_posts=new_count,
+                    images=cycle_images, videos=cycle_videos,
+                )
 
                 if new_count == 0:
                     log.info(f"  No new posts on {page_name} ({len(posts)} already seen)")
@@ -630,9 +711,18 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
             finally:
                 _close_session_safe(context, browser, needs_close)
 
-            # Delay between pages
-            if page_cfg != anon_pages[-1]:
-                time.sleep(human_delay(2.0, 5.0))
+        return page_new
+
+    # Process pages concurrently (3 at a time by default)
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="feed") as pool:
+        futures = {pool.submit(_process_page, cfg): cfg for cfg in enabled_pages}
+        for future in as_completed(futures):
+            try:
+                page_new = future.result()
+                all_new.extend(page_new)
+            except Exception as e:
+                page_name = futures[future].get("name", "?")
+                log.error(f"  Feed poll thread error on {page_name}: {e}")
 
     save_state(state)
     return all_new
@@ -1464,34 +1554,51 @@ def main():
         )
         return
 
-    # --- Verify Tor connection if enabled ---
+    # --- Tor lifecycle: cleanup stale processes, start main, start pool ---
+    tor_pool = None
+    main_tor_proc = None
+
     if config.get("tor", {}).get("enabled", False):
+        from tor_pool import kill_all_stale_tor, ensure_main_tor, stop_main_tor, TorPool
+
+        scraper_status.starting("Cleaning up stale Tor processes...")
+
+        # Step 1: Kill ALL stale Tor processes from previous runs
+        kill_all_stale_tor(config)
+
+        # Step 2: Start main Tor instance (port 9050)
+        scraper_status.starting("Starting main Tor instance...")
+        main_tor_proc = ensure_main_tor(config)
+        if main_tor_proc:
+            atexit.register(stop_main_tor, main_tor_proc)
+
+        # Step 3: Verify Tor is working
         if not verify_tor_connection(config):
             log.error("Aborting: Tor is enabled but connection could not be verified.")
+            if main_tor_proc:
+                stop_main_tor(main_tor_proc)
             sys.exit(1)
 
-    # --- Start Tor pool if configured ---
-    tor_pool = None
-    tor_cfg = config.get("tor", {})
-    pool_size = tor_cfg.get("pool_size", 0)
+        # Step 4: Start pool if configured
+        tor_cfg = config.get("tor", {})
+        pool_size = tor_cfg.get("pool_size", 0)
 
-    if tor_cfg.get("enabled") and pool_size >= 2:
-        try:
-            from tor_pool import TorPool
-            log.info(f"Starting Tor pool ({pool_size} instances)...")
-            tor_pool = TorPool(config)
-            tor_pool.start()
-            ready = tor_pool.wait_ready()
-            if ready == 0:
-                log.warning("Tor pool: no instances ready, will use single instance")
-                tor_pool.stop()
+        if pool_size >= 2:
+            try:
+                scraper_status.starting(f"Starting Tor pool ({pool_size} instances)...")
+                log.info(f"Starting Tor pool ({pool_size} instances)...")
+                tor_pool = TorPool(config)
+                tor_pool.start()
+                ready = tor_pool.wait_ready()
+                if ready == 0:
+                    log.warning("Tor pool: no instances ready, will use single instance")
+                    tor_pool.stop()
+                    tor_pool = None
+                else:
+                    atexit.register(tor_pool.stop)
+            except Exception as e:
+                log.warning(f"Tor pool failed to start: {e}")
                 tor_pool = None
-            else:
-                # Register cleanup on exit
-                atexit.register(tor_pool.stop)
-        except Exception as e:
-            log.warning(f"Tor pool failed to start: {e}")
-            tor_pool = None
 
     # Build rate limiters — separate limits for anonymous vs logged-in
     anon_max = config.get("max_requests_per_hour", 30)
@@ -1525,6 +1632,14 @@ def main():
                 full_new = []
                 new_comments = 0
                 imports = 0
+
+                scraper_status.cycle_start(iteration)
+
+                # Update Tor health in status
+                if tor_pool:
+                    healthy = len(tor_pool.get_healthy())
+                    lw = sum(1 for i in tor_pool.instances if i.last_login_wall_at > 0)
+                    scraper_status.update_tor(healthy, pool_size, lw)
 
                 # --- Feed poll (fast, anonymous/Tor) ---
                 if use_feed:
@@ -1577,6 +1692,8 @@ def main():
                     f", login: {login_rate_limiter.count_last_hour()}/{login_max}/hr"
                     f"{pool_status})"
                 )
+
+                scraper_status.waiting(sleep_secs)
 
                 iteration += 1
                 time.sleep(sleep_secs)

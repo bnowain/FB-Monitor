@@ -367,6 +367,86 @@ async def untag_post_category_route(
 
 
 # ---------------------------------------------------------------------------
+# Retrieve comments on-demand
+# ---------------------------------------------------------------------------
+
+# Track running comment retrieval jobs
+_comment_jobs: dict[str, dict] = {}  # post_id -> {status, count, error}
+
+
+def _retrieve_comments_worker(post_id: str, post_url: str):
+    """Background thread: fetch comments for a post via Playwright."""
+    _comment_jobs[post_id] = {"status": "running", "count": 0, "error": None}
+    try:
+        from playwright.sync_api import sync_playwright
+        from comments import extract_comments
+        from stealth import create_stealth_context, get_tor_proxy
+        from sanitize import sanitize_comments as _sanitize
+
+        config_path = BASE_DIR / "config.json"
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+        proxy = get_tor_proxy(config)
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, proxy=proxy or None)
+            context = create_stealth_context(browser, proxy_override=proxy)
+            page = context.new_page()
+            page.goto(post_url, timeout=60000, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+
+            comments = extract_comments(page, browser_context=context, post_url=post_url)
+            page.close()
+            context.close()
+            browser.close()
+
+        if comments:
+            sanitized = _sanitize([c.to_dict() if hasattr(c, 'to_dict') else c for c in comments])
+            db.save_comments(post_id, sanitized)
+            _comment_jobs[post_id] = {"status": "done", "count": len(sanitized), "error": None}
+        else:
+            _comment_jobs[post_id] = {"status": "done", "count": 0, "error": None}
+
+    except Exception as e:
+        logging.getLogger("web-ui").error(f"Comment retrieval failed for {post_id}: {e}")
+        _comment_jobs[post_id] = {"status": "error", "count": 0, "error": str(e)}
+
+
+@app.post("/posts/{post_id}/retrieve-comments")
+async def retrieve_comments_route(post_id: str):
+    """Trigger on-demand comment retrieval for a post."""
+    post = db.get_post(post_id)
+    if not post:
+        return JSONResponse({"error": "Post not found"}, status_code=404)
+
+    post_url = post.get("post_url", "")
+    if not post_url:
+        return JSONResponse({"error": "No post URL available"}, status_code=400)
+
+    # Don't start if already running
+    existing = _comment_jobs.get(post_id, {})
+    if existing.get("status") == "running":
+        return JSONResponse({"status": "already_running"})
+
+    thread = threading.Thread(
+        target=_retrieve_comments_worker,
+        args=(post_id, post_url),
+        daemon=True,
+        name=f"comments-{post_id[:20]}",
+    )
+    thread.start()
+    return JSONResponse({"status": "started"})
+
+
+@app.get("/api/posts/{post_id}/comment-job")
+async def comment_job_status(post_id: str):
+    """Check status of a comment retrieval job."""
+    job = _comment_jobs.get(post_id)
+    if not job:
+        return {"status": "none"}
+    return job
+
+
+# ---------------------------------------------------------------------------
 # Entities (HTML)
 # ---------------------------------------------------------------------------
 
@@ -888,6 +968,13 @@ async def serve_attachment(attachment_id: int):
 async def api_health():
     """Health check endpoint for Atlas spoke polling."""
     return {"status": "ok"}
+
+
+@app.get("/api/scraper-status")
+async def api_scraper_status():
+    """Live scraper status for the UI status bar."""
+    from scraper_status import ScraperStatus
+    return ScraperStatus.read()
 
 
 @app.get("/api/posts/search")

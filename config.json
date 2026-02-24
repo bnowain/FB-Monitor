@@ -34,6 +34,91 @@
       "name": "Shasta County District Attorney",
       "url": "https://www.facebook.com/ShastaDA",
       "enabled": true
+    },
+    {
+      "name": "Official Redding Be Like",
+      "url": "https://www.facebook.com/OfficialReddingBeLike",
+      "enabled": true
+    },
+    {
+      "name": "Nathan The Creator",
+      "url": "https://www.facebook.com/NathanTheCreatorOfficial",
+      "enabled": true
+    },
+    {
+      "name": "Shasta Unfiltered",
+      "url": "https://www.facebook.com/ShastaUnfiltered",
+      "enabled": true
+    },
+    {
+      "name": "Mt Top Media",
+      "url": "https://www.facebook.com/MtTopMedia",
+      "enabled": true
+    },
+    {
+      "name": "PSOM Podcast",
+      "url": "https://www.facebook.com/psompodcast",
+      "enabled": true
+    },
+    {
+      "name": "Shasta Scout",
+      "url": "https://www.facebook.com/shastascout",
+      "enabled": true
+    },
+    {
+      "name": "Record Searchlight",
+      "url": "https://www.facebook.com/Record.Searchlight",
+      "enabled": true
+    },
+    {
+      "name": "PRA Lady",
+      "url": "https://www.facebook.com/profile.php?id=61585685676964",
+      "enabled": true
+    },
+    {
+      "name": "NorCal Critters",
+      "url": "https://www.facebook.com/norcalcritters",
+      "enabled": true
+    },
+    {
+      "name": "Shasta County Office of Education",
+      "url": "https://www.facebook.com/ShastaCountyOfficeOfEducation",
+      "enabled": true
+    },
+    {
+      "name": "City of Redding",
+      "url": "https://www.facebook.com/cityofredding",
+      "enabled": true
+    },
+    {
+      "name": "Joanna for County Clerk",
+      "url": "https://www.facebook.com/JoannaForCountyClerk",
+      "enabled": true
+    },
+    {
+      "name": "Shasta County Democratic Women's Club and Friends",
+      "url": "https://www.facebook.com/SCDWCF",
+      "enabled": true
+    },
+    {
+      "name": "Resner for Supervisor",
+      "url": "https://www.facebook.com/ResnerforSupervisor",
+      "enabled": true
+    },
+    {
+      "name": "North State Breakdown",
+      "url": "https://www.facebook.com/NorthStateBreakdown",
+      "enabled": true
+    },
+    {
+      "name": "Action News Now",
+      "url": "https://www.facebook.com/ActionNewsNow",
+      "enabled": true
+    },
+    {
+      "name": "KRCR News Channel 7",
+      "url": "https://www.facebook.com/KRCR7",
+      "enabled": true
     }
   ],
   "default_account": "anonymous",
@@ -67,7 +152,7 @@
     "pool_base_socks_port": 9060,
     "pool_bootstrap_timeout": 120,
     "pool_stall_timeout": 90,
-    "pool_max_restarts": 3,
+    "pool_max_restarts": 10,
     "pool_min_healthy": 4
   },
   "notifications": {
