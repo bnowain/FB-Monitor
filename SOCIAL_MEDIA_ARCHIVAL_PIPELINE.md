@@ -47,7 +47,7 @@ FB-Monitor is a surprisingly mature Facebook-specific archival system. After a t
 | **No content hashing** — no SHA-256 of post text or media list | Can't efficiently detect edits | Easy |
 | **No scheduled lookback strategy** — only 24hr comment tracking window | Misses late comments, no 7d/30d sweeps | Easy |
 | **Fragile DOM selectors** — every Facebook redesign can break extraction | Need constant maintenance | Inherent to approach |
-| **No RSS/API fallback** — purely Playwright-based | When browser extraction fails, there's no backup data source | Medium |
+| **No API fallback** — purely Playwright-based (Facebook killed native RSS in 2015) | When browser extraction fails, there's no backup data source | Medium |
 
 ### The Cheapest Compliant Path
 
@@ -177,7 +177,7 @@ class BaseCollector(ABC):
 - Parse reply nesting depth from DOM structure (the `_strategy_aria` code already detects `isReply` via nested `<li>` — extend to capture parent comment reference)
 - Add content hashing on save (SHA-256 of `text + sorted(media_urls)`)
 - Add `first_seen_at` / `last_seen_at` / `content_hash` columns
-- Add RSS fallback: some Facebook Pages have RSS feeds at `facebook.com/{page}/posts?_fb_noscript=1` or via third-party RSS bridges
+- ~~RSS fallback~~ — Not viable. Facebook killed native Page RSS feeds in June 2015. Third-party "RSS" services are just scrapers with a middleman.
 
 **Current comment extraction gap analysis:**
 The `Comment` dataclass in `comments.py:23-29` has: `author`, `text`, `timestamp`, `is_reply`, `strategy`. It's missing:
