@@ -9,6 +9,7 @@ fb_monitor.db-wal
 fb_monitor.db-shm
 state.json
 extractor_health.json
+scraper_status.json
 
 # Tor bundle (large binaries, user-provided)
 tor-bundle/
