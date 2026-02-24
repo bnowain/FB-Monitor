@@ -59,11 +59,11 @@ FB-Monitor is a surprisingly mature Facebook-specific archival system. After a t
 - Edit/delete detection via content hashing
 
 **Use official channels where available:**
-- YouTube Data API v3 (free, 10K units/day)
-- Bluesky AT Protocol (free, open, no auth required for public data)
-- Mastodon API (free, open, generous limits)
-- Meta Content Library API (free for qualifying researchers — apply)
-- X/Twitter API Basic tier ($200/mo) or Academic Research access
+- YouTube Data API v3 (free, 10K units/day — best bang for zero bucks)
+- Bluesky AT Protocol (free, open, no auth needed for public data, IETF standardization underway)
+- Mastodon API (free, open, 300 req/5min — generous)
+- Meta Content Library API ($371/mo via SOMAR for qualifying academic/nonprofit researchers)
+- X/Twitter API Basic tier ($100-200/mo) or Pro ($5K/mo) — academic research tier was sunsetted in 2023
 
 **What you should NOT build yourself:**
 - A CrowdTangle replacement (it's dead, Meta Content Library replaces it)
@@ -76,14 +76,14 @@ FB-Monitor is a surprisingly mature Facebook-specific archival system. After a t
 
 | Platform | Compliant Access Method | Posts? | Comments? | Media URLs? | Cost | Notes/Risks |
 |----------|------------------------|--------|-----------|-------------|------|-------------|
-| **Facebook Pages** | Meta Content Library API (researchers); Graph API (Page owners only); Playwright scraping (current approach) | Yes (all methods) | MCL: Yes (aggregated). Graph: Yes (if Page owner). Scraping: Yes (DOM-parsed) | MCL: No direct URLs. Graph: Yes. Scraping: Yes (CDN URLs, ephemeral) | MCL: Free (if approved). Graph: Free. Scraping: Free + Tor costs | MCL requires academic/journalist affiliation. Graph API only works if you own/admin the Page. Scraping is what FB-Monitor does now — works but fragile and ToS-gray. |
-| **Instagram** | Instagram Graph API (business accounts); Meta Content Library (researchers); Instagram Basic Display API (deprecated 2024) | Graph: Yes (own accounts). MCL: Yes (public) | Graph: Yes (own posts only). MCL: Limited | Graph: Yes. MCL: No | Free | Basic Display API was sunset Dec 2024. Graph API requires a connected Facebook Page + business account. MCL is the best path for third-party public data. |
-| **X / Twitter** | X API v2 (Basic, Pro, Enterprise tiers) | Basic: 10K reads/mo. Pro: 1M reads/mo | Basic: No search. Pro: Full search + replies | Yes (media URLs in tweet objects) | Basic: $200/mo. Pro: $5,000/mo. Enterprise: custom | Free tier is write-only (useless for archival). Basic tier is marginal for monitoring many accounts. Pro is the realistic option for serious archival. Academic Research access may still exist for qualifying projects. |
-| **YouTube** | YouTube Data API v3 | Yes (channels, playlists, search) | Yes (comment threads with threading!) | Yes (thumbnail URLs; video streams need yt-dlp) | Free (10K quota units/day) | Best official API of any platform for this use case. Comments include `parentId` for threading. 10K units = ~100 channel checks + ~500 comment fetches/day. Very doable. |
-| **TikTok** | TikTok Research API | Yes (limited) | No (comments not exposed) | No (video URLs not exposed) | Free (researchers) | Requires university/nonprofit affiliation. Very limited data access. No comments. Essentially useless for accountability archival. |
-| **Threads** | Threads API (launched mid-2024) | Yes (own account's posts) | Yes (replies to own posts) | Yes | Free | Only works for your own account's content. No third-party public page access. Useless for monitoring others' accounts. |
-| **Bluesky** | AT Protocol (public, open) | Yes (full firehose or per-account) | Yes (full thread trees) | Yes (blob URLs) | Free | Best-case scenario. Fully open protocol, no auth needed for public data, no rate limit concerns for reasonable use. `app.bsky.feed.getAuthorFeed` + `app.bsky.feed.getPostThread` give you everything. |
-| **Mastodon** | Mastodon REST API | Yes (per-instance, per-account) | Yes (full thread context) | Yes (media attachment URLs) | Free | Federated = need to know which instance each official is on. No central directory. API is generous (300 req/5min default). Fully open source. |
+| **Facebook Pages** | Meta Content Library API (researchers); Graph API v22 (Page owners only); Playwright scraping (current approach) | Yes (all methods) | MCL: Yes (searchable since 2025, 100+ data fields). Graph: Yes (if Page owner). Scraping: Yes (DOM-parsed) | MCL: No direct URLs. Graph: Yes. Scraping: Yes (CDN URLs, ephemeral) | MCL via SOMAR: **$371/mo per team + $1K one-time fee** (free compute ended Dec 2025). Graph: Free. Scraping: Free + Tor costs | MCL requires academic/nonprofit affiliation. Apply through SOMAR at ICPSR. Graph API cannot read arbitrary third-party page posts. CrowdTangle shut down 2024. MCL limit: 500K records/7 days. |
+| **Instagram** | Instagram Graph API (business/creator accounts); Meta Content Library (researchers) | Graph: Yes (own accounts). MCL: Yes (public) | Graph: Yes (own posts only, read/reply/delete). MCL: Limited | Graph: Yes. MCL: No | Free | Basic Display API **retired Dec 4, 2024**. Graph API requires Business/Creator account linked to FB Page. No public discovery of arbitrary users' content. Several metrics deprecated in v21+ (Jan 2025). MCL is the only path for third-party data. |
+| **X / Twitter** | X API v2 (Free, Basic, Pro, Enterprise tiers) | Free: ~0 reads. Basic: 10K/mo. Pro: 1M/mo | Basic: No search. Pro: Full archive search + replies | Yes (media URLs in tweet expansions) | Free: $0 (write-only). Basic: **$100-200/mo**. Pro: **$5,000/mo**. Enterprise: **$42,000+/mo** | Free tier is useless for reading. Basic is marginal. Pro is the realistic minimum for archival. **Academic Research tier sunsetted 2023** — no free research access exists. Pay-per-use in closed beta ($500 voucher for testers, Dec 2025). Enterprise costs up ~9,900% since 2022. |
+| **YouTube** | YouTube Data API v3 | Yes (channels, playlists, search) | Yes (comment threads with `parentId` threading!) | Yes (thumbnail URLs; video streams need yt-dlp) | **Free** (10K quota units/day) | Best official API for this use case. Each list request = 1 unit, search = 100 units. ~100 channel checks + ~500 comment fetches/day easily fits quota. YouTube Researcher Program may grant quota increases. No video download or transcript access via API. |
+| **TikTok** | TikTok Research API | Yes (metadata + `voice_to_text` for ~20% of videos) | **Yes** (100 per request, full retrieval) | No (video download not available) | Free (academic only) | Requires **non-profit university** affiliation (US/EU only). 1K requests/day, 100K records/day. 30-day query windows. Data must refresh every 15 days. Application can take 4+ weeks (one case: 21 months). AI Forensics found 1 in 8 videos unretrievable. No journalist/civic program. |
+| **Threads** | Threads API (launched June 2024, expanding rapidly) | Own posts + **public profile discovery** (July 2025) + **keyword search** (2025) | Own account replies only | Own account only | Free | Keyword search: 500 queries/7-day window (~71/day). Sensitive keywords return empty results. Public profiles retrievable since July 2025. MCL includes Threads posts from accounts with 1,000+ followers (since Feb 2025). API still young — expect breaking changes. |
+| **Bluesky** | AT Protocol (public, open, **IETF standardization underway**) | Yes (full firehose + per-account + full-text search with date ranges) | Yes (full thread trees via `getPostThread`) | Yes (blob CDN URLs) | **Free, no auth needed** for public reads | Best-case scenario. 3,000 req/5min per IP. Firehose: real-time WebSocket of ALL public activity (no auth). Jetstream: simplified JSON alternative. ~196M users. Running your own PDS gives unlimited access. |
+| **Mastodon** | Mastodon REST API + Streaming API | Yes (per-instance public timeline + per-account) | Yes (thread context: unauth 40 ancestors/60 descendants; auth 4,096/4,096 unlimited depth) | Yes (attachment URLs in status objects) | **Free** (open source) | 300 req/5min per user, 7,500/5min per IP. Federated = must query each instance separately. Mastodon 4.5 (Oct 2025) adds async reply fetching. Instance operators can disable public API. Instances can shut down permanently. |
 
 ### Platform Priority Ranking (for civic accountability)
 
@@ -93,8 +93,8 @@ FB-Monitor is a surprisingly mature Facebook-specific archival system. After a t
 4. **X/Twitter** — Still significant for public officials, but $200-5000/mo for useful access. Cost is the main barrier.
 5. **Mastodon** — Some government agencies have Mastodon accounts. Free API. Worth adding if targets exist.
 6. **Instagram** — Mostly visual content. Limited API access for third-party monitoring. Low priority unless specific targets.
-7. **TikTok** — No comment access, limited data. Very low priority.
-8. **Threads** — API is self-only. Skip unless API opens up.
+7. **TikTok** — Research API has comments but requires university affiliation. Low priority unless you qualify.
+8. **Threads** — API improving (keyword search, public profiles since 2025). Monitor for future expansion.
 
 ---
 
