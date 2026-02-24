@@ -927,3 +927,45 @@ When a public official deletes a comment (theirs or a constituent's), that delet
 3. **Two-tier account system** — The anonymous/logged-in split with different rate limits is the right approach.
 4. **JS injection collector** — Running extraction logic inside the page context avoids many anti-scraping measures.
 5. **Separate feed poll cycle** — The fast 3-minute feed poll + slower 15-minute full cycle is a good separation of concerns.
+
+---
+
+## Appendix B: API Research Sources
+
+**Facebook / Meta Content Library:**
+- [Meta Content Library | Transparency Center](https://transparency.meta.com/researchtools/meta-content-library)
+- [Meta Content Library | SOMAR / ICPSR](https://www.icpsr.umich.edu/sites/somar/meta-content-library)
+- [Meta Graph API Considerations | Data365](https://data365.co/blog/meta-graph-api)
+
+**Instagram:**
+- [Instagram Graph API Developer Guide 2026](https://elfsight.com/blog/instagram-graph-api-complete-developer-guide-for-2026/)
+- [After Basic Display EOL: Instagram 2026 API Rules](https://storrito.com/resources/Instagram-API-2026/)
+
+**X/Twitter:**
+- [X API Pricing Tiers 2025](https://twitterapi.io/blog/twitter-api-pricing-2025)
+- [About the X API](https://docs.x.com/x-api/getting-started/about-x-api)
+- [What Happened to Academic Research on Twitter | CJR](https://www.cjr.org/tow_center/qa-what-happened-to-academic-research-on-twitter.php)
+
+**YouTube:**
+- [YouTube Data API v3 Overview](https://developers.google.com/youtube/v3/getting-started)
+- [YouTube API Quota Calculator](https://developers.google.com/youtube/v3/determine_quota_cost)
+- [YouTube Researcher Program](https://research.youtube/how-it-works/)
+
+**TikTok:**
+- [TikTok Research API](https://developers.tiktok.com/products/research-api/)
+- [TikTok Research API Problems | AI Forensics](https://aiforensics.org/work/tk-api)
+
+**Threads:**
+- [Threads API Documentation | Postman](https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api)
+- [Meta Expands Threads API](https://ppc.land/meta-expands-threads-api-with-advanced-features-for-developers/)
+
+**Bluesky:**
+- [Bluesky Firehose Documentation](https://docs.bsky.app/docs/advanced-guides/firehose)
+- [Bluesky Rate Limits](https://docs.bsky.app/docs/advanced-guides/rate-limits)
+- [Introducing Jetstream](https://docs.bsky.app/blog/jetstream)
+- [app.bsky.feed.searchPosts](https://docs.bsky.app/docs/api/app-bsky-feed-search-posts)
+
+**Mastodon:**
+- [Mastodon API Rate Limits](https://docs.joinmastodon.org/api/rate-limits/)
+- [Mastodon Statuses API](https://docs.joinmastodon.org/methods/statuses/)
+- [Mastodon 4.5 for Developers](https://blog.joinmastodon.org/2025/10/mastodon-4-5-for-devs/)
