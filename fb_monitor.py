@@ -67,7 +67,7 @@ from sessions import (
     group_pages_by_account, list_accounts, delete_account,
 )
 from collector import inject as collector_inject, expand_and_extract
-from sanitize import is_login_wall
+from sanitize import is_login_wall, get_post_age_days
 from scraper_status import status as scraper_status
 
 # ---------------------------------------------------------------------------
@@ -624,11 +624,22 @@ def feed_poll_cycle(config: dict, rate_limiter: RateLimiter, tor_pool=None) -> l
                 new_count = 0
                 cycle_images = 0
                 cycle_videos = 0
+                max_age = config.get("max_post_age_days", 7)
                 for post in posts:
                     post_id = post.get("post_id", "")
                     with _state_lock:
                         if not post_id or is_post_seen(state, page_key, post_id):
                             continue
+
+                    # Skip old posts (e.g., pinned or from deep scrolling)
+                    ts = post.get("timestamp", "")
+                    age = get_post_age_days(ts)
+                    if age is not None and age > max_age:
+                        log.debug(f"  Skipping old post {post_id[:40]} "
+                                  f"(age: {age:.0f}d, max: {max_age}d)")
+                        with _state_lock:
+                            mark_post_seen(state, page_key, post_id)
+                        continue
 
                     db_save_post(post, account="anonymous")
 
@@ -817,6 +828,16 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
                 post_page = None
 
             if not post_data:
+                mark_post_seen(state, page_key, post.id)
+                continue
+
+            # Skip old posts
+            max_age = config.get("max_post_age_days", 7)
+            ts = getattr(post_data, "timestamp", "") or ""
+            age = get_post_age_days(ts)
+            if age is not None and age > max_age:
+                log.debug(f"  Skipping old post {post.id[:40]} "
+                          f"(age: {age:.0f}d, max: {max_age}d)")
                 mark_post_seen(state, page_key, post.id)
                 continue
 

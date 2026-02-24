@@ -198,6 +198,127 @@ def resolve_relative_timestamp(raw: str, reference_date: Optional[datetime] = No
 
 
 # ---------------------------------------------------------------------------
+# Absolute timestamp parsing
+# ---------------------------------------------------------------------------
+
+# "February 6 at 6:00 PM", "February 9 at 11:42 AM"
+_US_TS_RE = re.compile(
+    r"^(\w+)\s+(\d{1,2})\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)$",
+    re.IGNORECASE,
+)
+
+# "14 February at 08:55" (UK/intl — 24-hour clock)
+_UK_TS_RE = re.compile(
+    r"^(\d{1,2})\s+(\w+)\s+at\s+(\d{1,2}):(\d{2})$",
+    re.IGNORECASE,
+)
+
+# "January 23", "7 January" (date only, no time)
+_DATE_ONLY_RE = re.compile(
+    r"^(\w+)\s+(\d{1,2})$|^(\d{1,2})\s+(\w+)$",
+    re.IGNORECASE,
+)
+
+_MONTH_MAP = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def parse_fb_timestamp(raw: str) -> Optional[datetime]:
+    """
+    Parse Facebook's absolute timestamp formats into a datetime.
+
+    Handles:
+      - ISO format: 2026-02-22T23:40:20.344155+00:00
+      - US format:  February 6 at 6:00 PM
+      - UK format:  14 February at 08:55
+      - Date only:  January 23, 7 January
+
+    Returns None if the format is not recognized.
+    Assumes current year for formats without a year.
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip().replace("\u202f", " ")
+
+    # Already ISO format
+    if raw.startswith("20"):
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            pass
+
+    now = datetime.now(timezone.utc)
+
+    # US: "February 6 at 6:00 PM"
+    m = _US_TS_RE.match(raw)
+    if m:
+        month_name, day, hour, minute, ampm = m.groups()
+        month = _MONTH_MAP.get(month_name.lower())
+        if month:
+            h = int(hour)
+            if ampm.upper() == "PM" and h != 12:
+                h += 12
+            elif ampm.upper() == "AM" and h == 12:
+                h = 0
+            year = now.year
+            dt = datetime(year, month, int(day), h, int(minute), tzinfo=timezone.utc)
+            # If parsed date is in the future, it's from last year
+            if dt > now + timedelta(days=1):
+                dt = dt.replace(year=year - 1)
+            return dt
+
+    # UK: "14 February at 08:55"
+    m = _UK_TS_RE.match(raw)
+    if m:
+        day, month_name, hour, minute = m.groups()
+        month = _MONTH_MAP.get(month_name.lower())
+        if month:
+            year = now.year
+            dt = datetime(year, month, int(day), int(hour), int(minute), tzinfo=timezone.utc)
+            if dt > now + timedelta(days=1):
+                dt = dt.replace(year=year - 1)
+            return dt
+
+    # Date only: "January 23" or "7 January"
+    m = _DATE_ONLY_RE.match(raw)
+    if m:
+        if m.group(1) and m.group(2):
+            # "January 23"
+            month_name, day = m.group(1), m.group(2)
+        else:
+            # "7 January"
+            day, month_name = m.group(3), m.group(4)
+        month = _MONTH_MAP.get(month_name.lower())
+        if month:
+            year = now.year
+            dt = datetime(year, month, int(day), 12, 0, tzinfo=timezone.utc)
+            if dt > now + timedelta(days=1):
+                dt = dt.replace(year=year - 1)
+            return dt
+
+    return None
+
+
+def get_post_age_days(timestamp: str) -> Optional[float]:
+    """
+    Return the age of a post in days based on its timestamp.
+    Returns None if the timestamp cannot be parsed.
+    """
+    dt = parse_fb_timestamp(timestamp)
+    if dt is None:
+        return None
+    now = datetime.now(timezone.utc)
+    return (now - dt).total_seconds() / 86400
+
+
+# ---------------------------------------------------------------------------
 # Garbage comment detection
 # ---------------------------------------------------------------------------
 
@@ -372,15 +493,20 @@ def sanitize_post(post_data: dict, page_name: str = "") -> Optional[dict]:
     if rc:
         post_data["reaction_count"] = clean_reaction_count(rc)
 
-    # Resolve relative timestamps
+    # Resolve timestamps to ISO format
     ts = post_data.get("timestamp", "")
     ts_raw = post_data.get("timestamp_raw", "")
     raw_to_resolve = ts_raw or ts
     if raw_to_resolve:
+        # Try relative first ("6d", "3h")
         resolved = resolve_relative_timestamp(raw_to_resolve)
-        # Only update if we actually resolved (changed the value)
         if resolved != raw_to_resolve:
             post_data["timestamp"] = resolved
+        else:
+            # Try absolute ("February 6 at 6:00 PM", "7 January")
+            dt = parse_fb_timestamp(raw_to_resolve)
+            if dt is not None:
+                post_data["timestamp"] = dt.isoformat()
 
     return post_data
 

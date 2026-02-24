@@ -267,14 +267,20 @@
             </a>
             {% endif %}
             {% elif att.type == 'video' %}
+            {% set poster_att = attachments | selectattr('type', 'equalto', 'poster') | first %}
             {% if att.local_path %}
-            <video controls preload="metadata" style="max-width:100%; border-radius:6px;">
+            <video controls preload="metadata" style="max-width:100%; border-radius:6px;"
+                   {% if poster_att and poster_att.local_path %}poster="/attachment/{{ poster_att.id }}"{% endif %}>
                 <source src="/attachment/{{ att.id }}" type="video/mp4">
                 <a href="/attachment/{{ att.id }}">{{ att.filename }}</a>
             </video>
             {% else %}
             <div class="video-placeholder">
+                {% if poster_att and poster_att.local_path %}
+                <img src="/attachment/{{ poster_att.id }}" alt="Video preview" style="width:100%; border-radius:6px;">
+                {% else %}
                 <div class="icon">&#127909;</div>
+                {% endif %}
                 {% if att.url %}
                 <a href="{{ att.url }}" target="_blank">Video link</a>
                 {% endif %}

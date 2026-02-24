@@ -330,6 +330,15 @@ def save_attachments(post_id: str, attachments: dict, db_path: Optional[Path] = 
                 VALUES (?, 'video', ?, ?, ?)
             """, (post_id, str(p), p.name, now))
 
+        # Video poster (thumbnail used as preview image)
+        poster_path = attachments.get("poster")
+        if poster_path:
+            p = Path(poster_path)
+            conn.execute("""
+                INSERT OR IGNORE INTO attachments (post_id, type, local_path, filename, downloaded_at)
+                VALUES (?, 'poster', ?, ?, ?)
+            """, (post_id, str(p), p.name, now))
+
         # URL-only attachments (skip if we already have downloaded files of same type)
         if not attachments.get("images"):
             for img_url in attachments.get("image_urls", []):

@@ -14,6 +14,7 @@ Adds random delays between downloads to avoid burst patterns.
 
 import logging
 import random
+import re
 import subprocess
 import sys
 import time
@@ -21,6 +22,10 @@ from pathlib import Path
 from urllib.parse import urlparse, quote
 
 log = logging.getLogger("fb-monitor")
+
+# yt-dlp stream files have format IDs like .f12345v.mp4 or .f12345a.m4a
+# These are temporary pre-merge files that get deleted after merging.
+_STREAM_FILE_RE = re.compile(r"\.f\d+[va]\.\w+$")
 
 try:
     import requests
@@ -352,15 +357,14 @@ def download_video_ytdlp(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        # Find downloaded files — prefer scanning disk over parsing yt-dlp
-        # output because yt-dlp logs "Destination:" for pre-merge stream
-        # files (e.g. .f12345v.mp4) that get deleted after merging into
-        # the final file (e.g. video_00001.mp4).
+        # Find downloaded files by scanning disk. Skip .part files and
+        # yt-dlp stream files (.f12345v.mp4) that get deleted after merging.
         saved = []
         for ext in ("*.mp4", "*.mkv", "*.webm"):
             for p in output_dir.glob(ext):
-                if not str(p).endswith(".part"):
-                    saved.append(str(p))
+                if p.name.endswith(".part") or _STREAM_FILE_RE.search(p.name):
+                    continue
+                saved.append(str(p))
 
         if saved:
             log.info(f"  Video download complete: {len(saved)} file(s)")
@@ -375,11 +379,13 @@ def download_video_ytdlp(
 
     except subprocess.TimeoutExpired:
         log.warning("  yt-dlp timed out after 300s")
-        # Check for partial video files that are still usable
+        # Check for usable video files (skip .part and stream files)
         saved = []
         for ext in ("*.mp4", "*.mkv", "*.webm"):
             for p in output_dir.glob(ext):
-                if not str(p).endswith(".part") and p.stat().st_size > 100000:
+                if p.name.endswith(".part") or _STREAM_FILE_RE.search(p.name):
+                    continue
+                if p.stat().st_size > 100000:
                     saved.append(str(p))
         if saved:
             log.info(f"  Found {len(saved)} partial video file(s) after timeout")
@@ -435,22 +441,44 @@ def download_attachments(
     mode = "remote proxy" if (download_proxy and download_proxy.get("url")) else \
            "SOCKS proxy" if proxy_url else "direct"
 
-    # Filter out video thumbnails from image_urls when we have video URLs.
+    # Separate video thumbnails from real images.
     # Facebook puts a preview thumbnail in image_urls for video/reel posts.
     # These contain "t15.5256-10" (video thumbnail prefix) in the CDN path.
+    # We download the first thumbnail as a poster image for the video player.
     is_video_post = bool(video_urls) or any(
         p in post_url for p in ("/videos/", "/watch/", "/reel/")
     )
     if is_video_post and image_urls:
-        filtered_images = [
+        thumb_urls = [
             url for url in image_urls
-            if "t15.5256-10" not in url and "/v/t15." not in url
+            if "t15.5256-10" in url or "/v/t15." in url
         ]
-        if len(filtered_images) < len(image_urls):
-            skipped = len(image_urls) - len(filtered_images)
-            log.debug(f"  Filtered {skipped} video thumbnail(s) from image list")
+        filtered_images = [url for url in image_urls if url not in thumb_urls]
+
+        if thumb_urls:
+            log.debug(f"  Separated {len(thumb_urls)} video thumbnail(s) from image list")
             image_urls = filtered_images
             result["image_urls"] = filtered_images
+
+            # Download first thumbnail as poster for video preview
+            poster_url = thumb_urls[0]
+            poster_path = attachments_dir / "poster.jpg"
+            if not poster_path.exists():
+                try:
+                    if use_remote:
+                        _download_image_via_proxy(poster_url, poster_path, download_proxy)
+                    else:
+                        resp = requests.get(poster_url, timeout=30,
+                                            proxies=_get_proxy_dict(proxy_url),
+                                            headers={"User-Agent": "Mozilla/5.0"})
+                        resp.raise_for_status()
+                        poster_path.write_bytes(resp.content)
+                    log.debug(f"  Downloaded video poster: {poster_path}")
+                except Exception as e:
+                    log.debug(f"  Failed to download poster: {e}")
+
+            if poster_path.exists():
+                result["poster"] = str(poster_path)
 
     # Download images
     if image_urls:
@@ -486,6 +514,25 @@ def download_attachments(
             if yt_result:
                 result["videos"].extend(yt_result)
                 break  # Got the video, stop trying
+
+    # Fallback: extract poster from downloaded video via ffmpeg
+    if not result.get("poster") and result["videos"]:
+        video_file = result["videos"][0]
+        poster_path = attachments_dir / "poster.jpg"
+        if not poster_path.exists() and Path(video_file).exists():
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-ss", "1", "-i", video_file,
+                     "-frames:v", "1", "-q:v", "3", str(poster_path)],
+                    capture_output=True, timeout=30,
+                )
+                if poster_path.exists() and poster_path.stat().st_size > 0:
+                    result["poster"] = str(poster_path)
+                    log.info(f"  Extracted poster from video via ffmpeg")
+                else:
+                    poster_path.unlink(missing_ok=True)
+            except Exception as e:
+                log.debug(f"  ffmpeg poster extraction failed: {e}")
 
     total = len(result["images"]) + len(result["videos"])
     if total > 0:

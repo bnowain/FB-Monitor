@@ -95,6 +95,11 @@ async def page_feed(
         first_image = conn.execute(
             "SELECT id, local_path, url FROM attachments WHERE post_id=? AND type='image' ORDER BY id LIMIT 1", (pid,)
         ).fetchone()
+        # Fall back to poster (video thumbnail) if no regular image
+        if not first_image:
+            first_image = conn.execute(
+                "SELECT id, local_path, url FROM attachments WHERE post_id=? AND type='poster' ORDER BY id LIMIT 1", (pid,)
+            ).fetchone()
         post["attachment_counts"] = {"images": img_count, "videos": vid_count}
         post["comment_count"] = comment_count
         post["first_image_id"] = first_image["id"] if first_image else None

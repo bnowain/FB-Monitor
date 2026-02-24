@@ -125,6 +125,7 @@
   "feed_extraction": true,
   "feed_poll_minutes": 3,
   "feed_max_retries": 5,
+  "max_post_age_days": 7,
   "check_interval_minutes": 15,
   "comment_tracking_hours": 24,
   "comment_recheck_interval_minutes": 30,
