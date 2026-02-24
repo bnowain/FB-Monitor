@@ -171,13 +171,79 @@
         margin-top: 0.2rem;
         padding-left: 0.75rem;
     }
+    .fb-comment.depth-1 {
+        margin-left: 2.5rem;
+    }
+    .fb-comment.depth-2 {
+        margin-left: 5rem;
+    }
+    .fb-comment.depth-3 {
+        margin-left: 7rem;
+    }
     .fb-comment.reply {
         margin-left: 2.5rem;
     }
+    .fb-comment.depth-1 .c-avatar,
+    .fb-comment.depth-2 .c-avatar,
+    .fb-comment.depth-3 .c-avatar,
     .fb-comment.reply .c-avatar {
         width: 26px;
         height: 26px;
         font-size: 0.65rem;
+    }
+    .fb-comment.deleted .c-bubble {
+        opacity: 0.5;
+        border: 1px dashed var(--red);
+    }
+    .fb-comment .deleted-badge {
+        display: inline-block;
+        font-size: 0.7rem;
+        color: var(--red);
+        background: rgba(255, 60, 60, 0.1);
+        padding: 0.1rem 0.4rem;
+        border-radius: 3px;
+        margin-left: 0.4rem;
+    }
+    .fb-comment .c-meta {
+        font-size: 0.72rem;
+        color: var(--text-dim);
+        margin-top: 0.15rem;
+        padding-left: 0.75rem;
+    }
+    .version-history {
+        margin: 0.75rem 0;
+        padding: 0.75rem;
+        background: var(--surface2);
+        border-radius: 8px;
+        border-left: 3px solid var(--orange);
+    }
+    .version-history summary {
+        cursor: pointer;
+        color: var(--orange);
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+    .version-entry {
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.85rem;
+    }
+    .version-entry:last-child {
+        border-bottom: none;
+    }
+    .version-entry .v-time {
+        color: var(--text-dim);
+        font-size: 0.78rem;
+    }
+    .version-entry .v-text {
+        white-space: pre-wrap;
+        margin-top: 0.3rem;
+        line-height: 1.5;
+    }
+    .audit-info {
+        font-size: 0.78rem;
+        color: var(--text-dim);
+        margin-top: 0.25rem;
     }
     .fb-no-comments {
         color: var(--text-dim);
@@ -234,7 +300,17 @@
                     {{ post.timestamp or '' }}
                     {% if post.timestamp and post.detected_at %} &middot; {% endif %}
                     Captured {{ post.detected_at[:16] }}
+                    {% if post.is_deleted %}
+                    <span style="color: var(--red); font-weight: 600;"> &middot; DELETED {{ post.deleted_at[:16] if post.deleted_at else '' }}</span>
+                    {% endif %}
                 </div>
+                {% if post.first_seen_at or post.last_seen_at %}
+                <div class="audit-info">
+                    {% if post.first_seen_at %}First seen: {{ post.first_seen_at[:16] }}{% endif %}
+                    {% if post.last_seen_at %} &middot; Last seen: {{ post.last_seen_at[:16] }}{% endif %}
+                    {% if post.content_hash %} &middot; Hash: {{ post.content_hash }}{% endif %}
+                </div>
+                {% endif %}
             </div>
         </div>
 
@@ -250,6 +326,21 @@
         <!-- Post Text -->
         {% if post.text %}
         <div class="post-text">{{ post.text }}</div>
+        {% endif %}
+
+        <!-- Version History (edit tracking) -->
+        {% if post_versions %}
+        <div class="version-history">
+            <details>
+                <summary>{{ post_versions|length }} previous version{{ 's' if post_versions|length != 1 else '' }} (post was edited)</summary>
+                {% for v in post_versions %}
+                <div class="version-entry">
+                    <div class="v-time">Version from {{ v.captured_at[:16] }} &middot; hash: {{ v.content_hash or 'n/a' }}</div>
+                    <div class="v-text">{{ v.text or '(empty)' }}</div>
+                </div>
+                {% endfor %}
+            </details>
+        </div>
         {% endif %}
 
         <!-- Images / Videos — full width -->
@@ -346,7 +437,12 @@
         <!-- Comments -->
         <div class="comments-section">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                <h3 style="margin: 0;">{{ comments|length }} comment{{ 's' if comments|length != 1 else '' }}</h3>
+                <h3 style="margin: 0;">
+                    {{ comments|length }} comment{{ 's' if comments|length != 1 else '' }}
+                    {% if deleted_count %}
+                    <span style="color: var(--red); font-size: 0.8rem; font-weight: 400;">({{ deleted_count }} deleted)</span>
+                    {% endif %}
+                </h3>
                 {% if post.post_url %}
                 <button id="btn-retrieve-comments" onclick="retrieveComments()" style="background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
                     Retrieve Comments
@@ -356,16 +452,25 @@
             <div id="comment-status" style="display:none; padding: 0.5rem 0; font-size: 0.85rem;"></div>
             {% if comments %}
             {% for c in comments %}
-            <div class="fb-comment {{ 'reply' if c.is_reply else '' }}">
+            {% set depth = c.depth|default(0) %}
+            {% set depth_class = 'depth-' ~ depth if depth > 0 else ('reply' if c.is_reply else '') %}
+            <div class="fb-comment {{ depth_class }} {{ 'deleted' if c.is_deleted else '' }}">
                 <div class="c-avatar">{{ (c.author or '?')[0] }}</div>
                 <div>
                     <div class="c-bubble">
-                        <div class="c-author">{{ c.author or "Unknown" }}</div>
+                        <div class="c-author">
+                            {{ c.author or "Unknown" }}
+                            {% if c.is_deleted %}
+                            <span class="deleted-badge">deleted</span>
+                            {% endif %}
+                        </div>
                         <div class="c-text">{{ c.text }}</div>
                     </div>
-                    {% if c.timestamp %}
-                    <div class="c-time">{{ c.timestamp }}</div>
-                    {% endif %}
+                    <div class="c-meta">
+                        {% if c.timestamp %}{{ c.timestamp }}{% endif %}
+                        {% if c.first_seen_at %} &middot; first seen {{ c.first_seen_at[:16] }}{% endif %}
+                        {% if c.is_deleted and c.deleted_at %} &middot; deleted {{ c.deleted_at[:16] }}{% endif %}
+                    </div>
                 </div>
             </div>
             {% endfor %}

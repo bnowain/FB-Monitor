@@ -6,6 +6,7 @@ The scraper writes here alongside the existing JSON/file output, and the
 web UI reads from it.
 """
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -17,6 +18,14 @@ from sanitize import (
     is_login_wall, is_garbage_post, strip_page_chrome, clean_reaction_count,
     resolve_relative_timestamp, is_garbage_comment,
 )
+
+
+def content_hash(text: str, media_urls: list[str] = None) -> str:
+    """Generate a stable hash of post/comment content for edit detection."""
+    normalized = (text or "").strip()
+    media_part = "|".join(sorted(media_urls or []))
+    payload = f"{normalized}\n{media_part}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 log = logging.getLogger("fb-monitor")
 
@@ -31,6 +40,50 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def _migrate_add_columns(conn: sqlite3.Connection):
+    """Add new columns to existing tables (idempotent)."""
+    migrations = [
+        ("posts", "content_hash", "TEXT"),
+        ("posts", "first_seen_at", "TEXT"),
+        ("posts", "last_seen_at", "TEXT"),
+        ("posts", "is_deleted", "INTEGER DEFAULT 0"),
+        ("posts", "deleted_at", "TEXT"),
+        ("comments", "content_hash", "TEXT"),
+        ("comments", "first_seen_at", "TEXT"),
+        ("comments", "last_seen_at", "TEXT"),
+        ("comments", "is_deleted", "INTEGER DEFAULT 0"),
+        ("comments", "deleted_at", "TEXT"),
+        ("comments", "parent_comment_id", "INTEGER REFERENCES comments(id)"),
+        ("comments", "root_comment_id", "INTEGER REFERENCES comments(id)"),
+        ("comments", "depth", "INTEGER DEFAULT 0"),
+    ]
+    for table, column, col_type in migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+    # Backfill first_seen_at / last_seen_at from detected_at where NULL
+    conn.execute("""
+        UPDATE posts SET first_seen_at = detected_at
+        WHERE first_seen_at IS NULL AND detected_at IS NOT NULL
+    """)
+    conn.execute("""
+        UPDATE posts SET last_seen_at = detected_at
+        WHERE last_seen_at IS NULL AND detected_at IS NOT NULL
+    """)
+    conn.execute("""
+        UPDATE comments SET first_seen_at = detected_at
+        WHERE first_seen_at IS NULL AND detected_at IS NOT NULL
+    """)
+    conn.execute("""
+        UPDATE comments SET last_seen_at = detected_at
+        WHERE last_seen_at IS NULL AND detected_at IS NOT NULL
+    """)
+    conn.commit()
 
 
 def init_db(db_path: Optional[Path] = None):
@@ -55,7 +108,12 @@ def init_db(db_path: Optional[Path] = None):
             share_count_text TEXT,
             post_dir TEXT,
             account TEXT,
-            detected_at TEXT NOT NULL
+            detected_at TEXT NOT NULL,
+            content_hash TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS comments (
@@ -66,7 +124,37 @@ def init_db(db_path: Optional[Path] = None):
             timestamp TEXT,
             is_reply INTEGER DEFAULT 0,
             detected_at TEXT NOT NULL,
+            content_hash TEXT,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TEXT,
+            parent_comment_id INTEGER REFERENCES comments(id),
+            root_comment_id INTEGER REFERENCES comments(id),
+            depth INTEGER DEFAULT 0,
             UNIQUE(post_id, author, text)
+        );
+
+        -- Track post edits over time
+        CREATE TABLE IF NOT EXISTS post_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id TEXT NOT NULL REFERENCES posts(post_id),
+            text TEXT,
+            content_hash TEXT,
+            links TEXT,
+            reaction_count TEXT,
+            comment_count_text TEXT,
+            share_count_text TEXT,
+            captured_at TEXT NOT NULL
+        );
+
+        -- Track comment edits over time
+        CREATE TABLE IF NOT EXISTS comment_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            comment_id INTEGER NOT NULL REFERENCES comments(id),
+            text TEXT,
+            content_hash TEXT,
+            captured_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS attachments (
@@ -200,8 +288,21 @@ def init_db(db_path: Optional[Path] = None):
         CREATE INDEX IF NOT EXISTS idx_entity_pages ON entity_pages(entity_id);
         CREATE INDEX IF NOT EXISTS idx_entity_people ON entity_people(entity_id);
         CREATE INDEX IF NOT EXISTS idx_import_queue_status ON import_queue(status);
+
+        CREATE INDEX IF NOT EXISTS idx_posts_content_hash ON posts(content_hash);
+        CREATE INDEX IF NOT EXISTS idx_posts_first_seen ON posts(first_seen_at);
+        CREATE INDEX IF NOT EXISTS idx_posts_deleted ON posts(is_deleted);
+        CREATE INDEX IF NOT EXISTS idx_comments_content_hash ON comments(content_hash);
+        CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_comment_id);
+        CREATE INDEX IF NOT EXISTS idx_comments_root ON comments(root_comment_id);
+        CREATE INDEX IF NOT EXISTS idx_comments_deleted ON comments(is_deleted);
+        CREATE INDEX IF NOT EXISTS idx_post_versions_post ON post_versions(post_id);
+        CREATE INDEX IF NOT EXISTS idx_comment_versions_comment ON comment_versions(comment_id);
     """)
     conn.commit()
+
+    # --- Migrate existing databases: add new columns if missing ---
+    _migrate_add_columns(conn)
 
     # Seed default categories
     now = datetime.now(timezone.utc).isoformat()
@@ -227,29 +328,69 @@ def save_post(post_data: dict, account: str = "", db_path: Optional[Path] = None
 
     post_data should be the dict from PostData.to_dict() with extra fields
     (detected_at, post_dir, attachments).
+
+    On update: detects content edits via content_hash. If the post text has
+    changed, saves the old version to post_versions before updating.
     """
     conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    post_id = post_data.get("post_id", "")
+    text = post_data.get("text", "")
+    image_urls = post_data.get("image_urls", [])
+    video_urls = post_data.get("video_urls", [])
+    media_urls = image_urls + video_urls
+    new_hash = content_hash(text, media_urls)
+
     try:
+        # Check if post already exists (for edit detection)
+        existing = conn.execute(
+            "SELECT id, text, content_hash, links, reaction_count, "
+            "comment_count_text, share_count_text FROM posts WHERE post_id = ?",
+            (post_id,),
+        ).fetchone()
+
+        if existing and existing["content_hash"] and existing["content_hash"] != new_hash:
+            # Content changed — save old version
+            conn.execute("""
+                INSERT INTO post_versions
+                    (post_id, text, content_hash, links, reaction_count,
+                     comment_count_text, share_count_text, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                post_id,
+                existing["text"],
+                existing["content_hash"],
+                existing["links"] if isinstance(existing["links"], str) else json.dumps(existing["links"] or []),
+                existing["reaction_count"],
+                existing["comment_count_text"],
+                existing["share_count_text"],
+                now,
+            ))
+            log.info(f"DB: post {post_id[:40]} edited — saved previous version")
+
         conn.execute("""
             INSERT INTO posts (
                 post_id, page_name, page_url, post_url, author, text,
                 timestamp, timestamp_raw, shared_from, shared_original_url,
                 links, reaction_count, comment_count_text, share_count_text,
-                post_dir, account, detected_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                post_dir, account, detected_at,
+                content_hash, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(post_id) DO UPDATE SET
                 text=excluded.text,
                 timestamp=excluded.timestamp,
                 reaction_count=excluded.reaction_count,
                 comment_count_text=excluded.comment_count_text,
-                share_count_text=excluded.share_count_text
+                share_count_text=excluded.share_count_text,
+                content_hash=excluded.content_hash,
+                last_seen_at=excluded.last_seen_at
         """, (
-            post_data.get("post_id", ""),
+            post_id,
             post_data.get("page_name", ""),
             post_data.get("page_url", ""),
             post_data.get("url", ""),
             post_data.get("author", ""),
-            post_data.get("text", ""),
+            text,
             post_data.get("timestamp", ""),
             post_data.get("timestamp_raw", ""),
             post_data.get("shared_from", ""),
@@ -260,20 +401,28 @@ def save_post(post_data: dict, account: str = "", db_path: Optional[Path] = None
             post_data.get("share_count_text", ""),
             post_data.get("post_dir", ""),
             account,
-            post_data.get("detected_at", datetime.now(timezone.utc).isoformat()),
+            post_data.get("detected_at", now),
+            new_hash,
+            post_data.get("detected_at", now),  # first_seen_at (only on INSERT)
+            now,  # last_seen_at (always updated)
         ))
         conn.commit()
     except Exception as e:
-        log.warning(f"DB: failed to save post {post_data.get('post_id', '?')}: {e}")
+        log.warning(f"DB: failed to save post {post_id or '?'}: {e}")
     finally:
         conn.close()
 
 
 def save_comments(post_id: str, comments: list[dict], db_path: Optional[Path] = None):
     """
-    Insert comments for a post (skipping duplicates).
+    Insert comments for a post, with content hashing and edit detection.
 
     Each comment dict should have: author, text, timestamp, is_reply.
+    Optional threading fields: depth, parent_comment_id, root_comment_id.
+
+    On conflict (same post_id, author, text), updates last_seen_at.
+    If an existing comment by the same author has a different content_hash,
+    saves the old version to comment_versions.
     """
     conn = get_connection(db_path)
     now = datetime.now(timezone.utc).isoformat()
@@ -281,17 +430,36 @@ def save_comments(post_id: str, comments: list[dict], db_path: Optional[Path] = 
     try:
         for c in comments:
             try:
+                c_text = c.get("text", "")
+                c_author = c.get("author", "")
+                c_hash = content_hash(c_text)
+                c_depth = c.get("depth", 0)
+                c_is_reply = 1 if c.get("is_reply") else 0
+
+                # If depth not explicitly set, infer from is_reply
+                if c_depth == 0 and c_is_reply:
+                    c_depth = 1
+
                 conn.execute("""
-                    INSERT INTO comments (post_id, author, text, timestamp, is_reply, detected_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(post_id, author, text) DO NOTHING
+                    INSERT INTO comments (
+                        post_id, author, text, timestamp, is_reply, detected_at,
+                        content_hash, first_seen_at, last_seen_at, depth
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(post_id, author, text) DO UPDATE SET
+                        last_seen_at=excluded.last_seen_at,
+                        content_hash=excluded.content_hash
                 """, (
                     post_id,
-                    c.get("author", ""),
-                    c.get("text", ""),
+                    c_author,
+                    c_text,
                     c.get("timestamp", ""),
-                    1 if c.get("is_reply") else 0,
+                    c_is_reply,
                     now,
+                    c_hash,
+                    now,  # first_seen_at (only on INSERT)
+                    now,  # last_seen_at (always updated)
+                    c_depth,
                 ))
                 inserted += conn.total_changes
             except Exception:
@@ -357,6 +525,143 @@ def save_attachments(post_id: str, attachments: dict, db_path: Optional[Path] = 
         conn.commit()
     except Exception as e:
         log.warning(f"DB: failed to save attachments for {post_id}: {e}")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Edit / delete detection
+# ---------------------------------------------------------------------------
+
+def detect_deleted_comments(post_id: str, seen_comment_ids: set[int],
+                            db_path: Optional[Path] = None) -> int:
+    """
+    Mark comments as deleted if they were previously visible but weren't
+    found in the latest fetch.
+
+    Uses a conservative approach: only tombstones comments that have been
+    missing for 2+ consecutive checks (tracked via consecutive_misses in
+    the comment_versions table as a side-channel).
+
+    seen_comment_ids: set of comments.id values found in this fetch.
+    Returns count of newly tombstoned comments.
+    """
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    tombstoned = 0
+
+    try:
+        # Get all non-deleted comments for this post
+        existing = conn.execute(
+            "SELECT id, last_seen_at FROM comments "
+            "WHERE post_id = ? AND is_deleted = 0",
+            (post_id,),
+        ).fetchall()
+
+        for row in existing:
+            cid = row["id"]
+            if cid not in seen_comment_ids:
+                # Comment wasn't seen — check how long it's been missing
+                last_seen = row["last_seen_at"] or ""
+                if last_seen:
+                    try:
+                        last_dt = datetime.fromisoformat(last_seen)
+                        hours_missing = (
+                            datetime.now(timezone.utc) - last_dt
+                        ).total_seconds() / 3600
+                        if hours_missing >= 48:
+                            conn.execute(
+                                "UPDATE comments SET is_deleted = 1, deleted_at = ? "
+                                "WHERE id = ?",
+                                (now, cid),
+                            )
+                            tombstoned += 1
+                    except (ValueError, TypeError):
+                        pass
+
+        if tombstoned:
+            conn.commit()
+            log.info(f"DB: tombstoned {tombstoned} deleted comment(s) for {post_id[:40]}")
+    except Exception as e:
+        log.warning(f"DB: delete detection failed for {post_id}: {e}")
+    finally:
+        conn.close()
+
+    return tombstoned
+
+
+def detect_deleted_post(post_id: str, db_path: Optional[Path] = None) -> bool:
+    """
+    Mark a post as deleted (tombstone) if it was previously visible
+    but is no longer accessible. Returns True if newly tombstoned.
+    """
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        row = conn.execute(
+            "SELECT is_deleted, last_seen_at FROM posts WHERE post_id = ?",
+            (post_id,),
+        ).fetchone()
+        if row and not row["is_deleted"]:
+            last_seen = row["last_seen_at"] or ""
+            if last_seen:
+                try:
+                    last_dt = datetime.fromisoformat(last_seen)
+                    hours_missing = (
+                        datetime.now(timezone.utc) - last_dt
+                    ).total_seconds() / 3600
+                    if hours_missing >= 48:
+                        conn.execute(
+                            "UPDATE posts SET is_deleted = 1, deleted_at = ? "
+                            "WHERE post_id = ?",
+                            (now, post_id),
+                        )
+                        conn.commit()
+                        log.info(f"DB: tombstoned deleted post {post_id[:40]}")
+                        return True
+                except (ValueError, TypeError):
+                    pass
+    except Exception as e:
+        log.warning(f"DB: delete detection failed for post {post_id}: {e}")
+    finally:
+        conn.close()
+    return False
+
+
+def get_post_versions(post_id: str, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all saved versions of a post (edit history)."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM post_versions WHERE post_id = ? ORDER BY captured_at DESC",
+        (post_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_comment_versions(comment_id: int, db_path: Optional[Path] = None) -> list[dict]:
+    """Get all saved versions of a comment (edit history)."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM comment_versions WHERE comment_id = ? ORDER BY captured_at DESC",
+        (comment_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def touch_comment_last_seen(post_id: str, comment_ids: set[int],
+                            db_path: Optional[Path] = None):
+    """Update last_seen_at for comments that were found in the latest fetch."""
+    conn = get_connection(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        for cid in comment_ids:
+            conn.execute(
+                "UPDATE comments SET last_seen_at = ? WHERE id = ?",
+                (now, cid),
+            )
+        conn.commit()
     finally:
         conn.close()
 

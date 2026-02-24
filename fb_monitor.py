@@ -49,7 +49,9 @@ from database import (
     init_db, save_post as db_save_post, save_comments as db_save_comments,
     save_attachments as db_save_attachments, queue_media_batch,
     get_pending_imports, update_import_status, get_post as db_get_post,
-    cleanup_bad_data,
+    cleanup_bad_data, content_hash,
+    detect_deleted_comments, touch_comment_last_seen,
+    get_comments_for_post as db_get_comments_for_post,
 )
 from tracker import (
     load_state, save_state, is_post_seen, mark_post_seen,
@@ -988,6 +990,7 @@ def detect_new_posts(page_configs: list[dict], config: dict, state: dict, browse
 def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_context, rate_limiter: RateLimiter, is_logged_in: bool = False) -> int:
     """
     Recheck comments on the given tracking jobs.
+    Detects new comments, edits (via content_hash), and deletions (tombstones).
     Returns total new comments found.
     """
     if not due_jobs:
@@ -1002,10 +1005,11 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
 
     for job in due_jobs:
         post_url = job["post_url"]
+        post_id = job["post_id"]
         post_dir = Path(job["post_dir"])
         comments_path = post_dir / "comments.json"
 
-        log.info(f"  Rechecking: {job['page_name']} — {job['post_id'][:30]}... "
+        log.info(f"  Rechecking: {job['page_name']} — {post_id[:30]}... "
                  f"(check #{job.get('comment_checks', 0) + 1})")
 
         try:
@@ -1018,7 +1022,7 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
             post_page.close()
         except Exception as e:
             log.warning(f"  Failed to load post for comment recheck: {e}")
-            update_tracking_job(state, job["post_id"])
+            update_tracking_job(state, post_id)
             continue
 
         # Load existing and merge
@@ -1031,10 +1035,39 @@ def recheck_comments(due_jobs: list[dict], config: dict, state: dict, browser_co
         else:
             log.info(f"  No new comments (total: {len(merged)})")
 
-        # Save updated comments
+        # Save updated comments to file and DB
         save_comments_file(comments_path, merged, post_url)
-        db_save_comments(job["post_id"], [c.to_dict() for c in new_comments])
-        update_tracking_job(state, job["post_id"])
+        db_save_comments(post_id, [c.to_dict() for c in new_comments])
+
+        # --- Delete detection ---
+        # Build set of content hashes from this fetch to identify which
+        # DB comments are still visible
+        fetched_keys = set()
+        for c in new_comments:
+            fetched_keys.add(
+                content_hash(c.text)
+            )
+
+        # Match fetched comments to existing DB rows
+        db_comments = db_get_comments_for_post(post_id)
+        seen_ids = set()
+        for dbc in db_comments:
+            if dbc.get("content_hash") and dbc["content_hash"] in fetched_keys:
+                seen_ids.add(dbc["id"])
+            elif not dbc.get("content_hash"):
+                # Legacy comment without hash — match by author+text prefix
+                legacy_hash = content_hash(dbc.get("text", ""))
+                if legacy_hash in fetched_keys:
+                    seen_ids.add(dbc["id"])
+
+        # Update last_seen_at for seen comments
+        if seen_ids:
+            touch_comment_last_seen(post_id, seen_ids)
+
+        # Detect deletions (tombstone after 48h missing)
+        detect_deleted_comments(post_id, seen_ids)
+
+        update_tracking_job(state, post_id)
 
         # Random delay between rechecks — longer for logged-in accounts
         if job != due_jobs[-1]:
