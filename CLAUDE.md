@@ -146,6 +146,14 @@ pytest tests/ -v -k "api"        # API tests only
 4. **Import**: bulk URL import via API creates import queue entries
 5. **Stats**: dashboard shows correct aggregate statistics
 
+### Lazy ChromaDB Sync (Atlas RAG)
+Atlas maintains a centralized ChromaDB vector store. This project does NOT need its
+own vector DB. Atlas fetches candidate records from this spoke's search API, chunks
+deterministically, validates against ChromaDB cache, and embeds only new/stale chunks.
+ChromaDB is a cache — this spoke's SQLite DB is the source of truth.
+
+See: `Atlas/app/services/rag/deterministic_chunking.py` for this spoke's chunking strategy.
+
 ## Master Schema & Codex References
 
 **`E:\0-Automated-Apps\MASTER_SCHEMA.md`** — Canonical cross-project database

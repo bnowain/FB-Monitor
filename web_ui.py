@@ -975,6 +975,20 @@ async def api_health():
     return {"status": "ok"}
 
 
+@app.post("/api/system/shutdown")
+async def api_shutdown():
+    """Gracefully shut down the server."""
+    import asyncio as _asyncio, os as _os
+    log.info("Shutdown requested, exiting in 500ms")
+
+    async def _exit_soon():
+        await _asyncio.sleep(0.5)
+        _os._exit(0)
+
+    _asyncio.get_event_loop().create_task(_exit_soon())
+    return {"status": "shutting_down", "killed": []}
+
+
 @app.get("/api/scraper-status")
 async def api_scraper_status():
     """Live scraper status for the UI status bar."""
