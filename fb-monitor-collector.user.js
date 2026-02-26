@@ -521,15 +521,27 @@
       const tsEl = el.querySelector('a[href*="comment_id"] > span') || el.querySelector('abbr');
       if (tsEl) ts = tsEl.textContent?.trim() || '';
 
-      // Is reply (nested)
-      const isReply = el.closest('ul')?.closest('li') !== null;
+      // Compute nesting depth (reply-to-reply detection)
+      let depth = 0;
+      let cursor = el.closest('li');
+      while (cursor) {
+        const ul = cursor.parentElement?.closest('ul[role="list"]');
+        const outerLi = ul?.closest('li');
+        if (outerLi && outerLi !== cursor) {
+          depth++;
+          cursor = outerLi;
+        } else {
+          break;
+        }
+      }
+      const isReply = depth > 0;
 
       // Deduplicate
       const key = `${author.toLowerCase()}|${text.toLowerCase().substring(0, 100)}`;
       if (seen.has(key)) return;
       seen.add(key);
 
-      comments.push({ author, text, timestamp: ts, is_reply: isReply });
+      comments.push({ author, text, timestamp: ts, is_reply: isReply, depth });
     });
 
     return comments;

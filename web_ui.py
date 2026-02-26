@@ -189,6 +189,7 @@ async def post_detail(request: Request, post_id: str):
 
     comments = db.get_comments_for_post(post_id)
     attachments = db.get_attachments_for_post(post_id)
+    post_versions = db.get_post_versions(post_id)
 
     # Parse links JSON
     links = []
@@ -204,6 +205,9 @@ async def post_detail(request: Request, post_id: str):
     all_categories = db.get_categories()
     queued_media = db.get_media_queue_for_post(post_id)
 
+    # Count deleted comments
+    deleted_count = sum(1 for c in comments if c.get("is_deleted"))
+
     return templates.TemplateResponse("post_detail.html", {
         "request": request,
         "post": post,
@@ -215,6 +219,8 @@ async def post_detail(request: Request, post_id: str):
         "post_categories": post_categories,
         "all_categories": all_categories,
         "queued_media": queued_media,
+        "post_versions": post_versions,
+        "deleted_count": deleted_count,
         "active_page": "posts",
     })
 
@@ -1057,6 +1063,7 @@ async def api_post(post_id: str):
     post["comments"] = db.get_comments_for_post(post_id)
     post["attachments"] = db.get_attachments_for_post(post_id)
     post["people"] = db.get_people_for_post(post_id)
+    post["versions"] = db.get_post_versions(post_id)
     return post
 
 

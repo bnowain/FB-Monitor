@@ -26,6 +26,7 @@ class Comment:
     timestamp: str = ""
     is_reply: bool = False
     strategy: str = ""
+    depth: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -33,6 +34,7 @@ class Comment:
             "text": self.text,
             "timestamp": self.timestamp,
             "is_reply": self.is_reply,
+            "depth": self.depth,
         }
 
     @staticmethod
@@ -42,6 +44,7 @@ class Comment:
             text=d.get("text", ""),
             timestamp=d.get("timestamp", ""),
             is_reply=d.get("is_reply", False),
+            depth=d.get("depth", 0),
         )
 
 
@@ -77,16 +80,26 @@ def _strategy_aria(page) -> list[Comment]:
                         }
                     });
                 }
-                // is_reply: nested li inside another comment's li
-                const parentLi = el.closest('li');
-                const parentUl = parentLi?.parentElement?.closest('ul[role="list"]');
-                const grandparentLi = parentUl?.closest('li');
-                const isReply = grandparentLi !== null && grandparentLi !== parentLi;
+                // is_reply + depth: count nesting of li > ul > li chains
+                let depth = 0;
+                let cursor = el.closest('li');
+                while (cursor) {
+                    const ul = cursor.parentElement?.closest('ul[role="list"]');
+                    const outerLi = ul?.closest('li');
+                    if (outerLi && outerLi !== cursor) {
+                        depth++;
+                        cursor = outerLi;
+                    } else {
+                        break;
+                    }
+                }
+                const isReply = depth > 0;
                 return {
                     author: authorEl ? authorEl.innerText.trim() : '',
                     text: textEl ? textEl.innerText.trim() : '',
                     timestamp: timestamp,
-                    isReply: isReply
+                    isReply: isReply,
+                    depth: depth
                 };
             })"""
         )
@@ -94,12 +107,14 @@ def _strategy_aria(page) -> list[Comment]:
             text = item.get("text", "").strip()
             author = item.get("author", "Unknown")
             if text and len(text) >= 2 and not is_garbage_comment(author, text):
+                depth = item.get("depth", 0)
                 comments.append(Comment(
                     author=author,
                     text=text[:2000],
                     timestamp=item.get("timestamp", ""),
                     is_reply=item.get("isReply", False),
                     strategy="aria",
+                    depth=depth,
                 ))
     except Exception as e:
         log.debug(f"Comment strategy aria failed: {e}")
